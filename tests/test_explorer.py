@@ -179,8 +179,8 @@ class ExplorerTests(unittest.TestCase):
                     )
                     _write_csv(
                         state_dir / "per_state_summary.csv",
-                        ["program", "state_id", "state_hash", "active_passes", "pairs_tested", "dynamic_commute", "order_sensitive", "unknown", "max_conflict_component", "total_time_ms"],
-                        [{"program": "explore", "state_id": "S0000", "state_hash": "root-hash", "active_passes": "2", "pairs_tested": "1", "dynamic_commute": "1", "order_sensitive": "0", "unknown": "0", "max_conflict_component": "0", "total_time_ms": "11"}],
+                        ["program", "state_id", "state_hash", "active_passes", "dormant_passes", "pairs_tested", "dynamic_commute", "order_sensitive", "unknown", "max_conflict_component", "total_time_ms"],
+                        [{"program": "explore", "state_id": "S0000", "state_hash": "root-hash", "active_passes": "2", "dormant_passes": "0", "pairs_tested": "1", "dynamic_commute": "1", "order_sensitive": "0", "unknown": "0", "max_conflict_component": "0", "total_time_ms": "11"}],
                     )
                     return {"program": "explore", "state_id": "S0000", "summary_path": str(state_dir / "summary.md")}
 
@@ -252,8 +252,8 @@ class ExplorerTests(unittest.TestCase):
                 )
                 _write_csv(
                     state_dir / "per_state_summary.csv",
-                    ["program", "state_id", "state_hash", "active_passes", "pairs_tested", "dynamic_commute", "order_sensitive", "unknown", "max_conflict_component", "total_time_ms"],
-                    [{"program": "explore", "state_id": state_id, "state_hash": "child-hash", "active_passes": "0", "pairs_tested": "0", "dynamic_commute": "0", "order_sensitive": "0", "unknown": "0", "max_conflict_component": "0", "total_time_ms": "7"}],
+                    ["program", "state_id", "state_hash", "active_passes", "dormant_passes", "pairs_tested", "dynamic_commute", "order_sensitive", "unknown", "max_conflict_component", "total_time_ms"],
+                    [{"program": "explore", "state_id": state_id, "state_hash": "child-hash", "active_passes": "0", "dormant_passes": "2", "pairs_tested": "0", "dynamic_commute": "0", "order_sensitive": "0", "unknown": "0", "max_conflict_component": "0", "total_time_ms": "7"}],
                 )
                 return {"program": "explore", "state_id": state_id, "summary_path": str(state_dir / "summary.md")}
 
@@ -277,6 +277,7 @@ class ExplorerTests(unittest.TestCase):
             transitions = _read_csv(out_dir / "state_transitions.csv")
             relation_flips = _read_csv(out_dir / "relation_flip.csv")
             enable_suppress = _read_csv(out_dir / "enable_suppress.csv")
+            aggregate_by_depth = _read_csv(out_dir / "aggregate_by_depth.csv")
             multistate_summary = (out_dir / "multistate_summary.md").read_text(encoding="utf-8")
 
         self.assertEqual(result["states"], 3)
@@ -295,8 +296,27 @@ class ExplorerTests(unittest.TestCase):
         self.assertIn("effect_changed", {row["relation"] for row in enable_suppress})
         self.assertIn("Top relation flips", multistate_summary)
         self.assertIn("Enable/suppress counts", multistate_summary)
+        self.assertEqual([row["depth"] for row in aggregate_by_depth], ["0", "1"])
+        self.assertEqual(aggregate_by_depth[0]["num_states"], "1")
+        self.assertEqual(aggregate_by_depth[0]["avg_active_passes"], "2.00")
+        self.assertEqual(aggregate_by_depth[1]["num_states"], "2")
+        self.assertEqual(aggregate_by_depth[1]["avg_dormant_passes"], "2.00")
+        self.assertEqual(aggregate_by_depth[1]["state_cache_hits"], "1")
+        self.assertEqual(aggregate_by_depth[1]["suppress_count"], "2")
+        self.assertEqual(aggregate_by_depth[1]["effect_changed_count"], "2")
+        self.assertEqual(aggregate_by_depth[1]["relation_flip_count"], "2")
+        self.assertEqual(aggregate_by_depth[1]["commute_to_sensitive"], "2")
+        self.assertEqual(aggregate_by_depth[1]["total_time_ms"], "14.00")
+        self.assertIn("## Overall", multistate_summary)
+        self.assertIn(f"- root state hash: {states[0]['state_hash']}", multistate_summary)
+        self.assertIn("- duplicate states: 1", multistate_summary)
+        self.assertIn("## By depth table", multistate_summary)
+        self.assertIn("## Relation Flips", multistate_summary)
+        self.assertIn("## Largest Components", multistate_summary)
+        self.assertIn("## Interpretation", multistate_summary)
         self.assertEqual(result["relation_flip_csv"], str(out_dir / "relation_flip.csv"))
         self.assertEqual(result["enable_suppress_csv"], str(out_dir / "enable_suppress.csv"))
+        self.assertEqual(result["aggregate_by_depth_csv"], str(out_dir / "aggregate_by_depth.csv"))
         self.assertEqual(result["multistate_summary"], str(out_dir / "multistate_summary.md"))
 
 

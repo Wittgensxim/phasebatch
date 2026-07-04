@@ -9,7 +9,13 @@ from .config import load_passes
 from .normalizer import canonical_hash
 from .profiler import validate_passes
 from .runner import prepare_input_ir
-from .schema import ENABLE_SUPPRESS_FIELDS, RELATION_FLIP_FIELDS, STATE_FIELDS, STATE_TRANSITION_FIELDS
+from .schema import (
+    AGGREGATE_BY_DEPTH_FIELDS,
+    ENABLE_SUPPRESS_FIELDS,
+    RELATION_FLIP_FIELDS,
+    STATE_FIELDS,
+    STATE_TRANSITION_FIELDS,
+)
 from .tools import collect_toolchain, write_metadata
 
 
@@ -175,7 +181,9 @@ def explore_states(
     _write_csv(out_dir / "state_transitions.csv", STATE_TRANSITION_FIELDS, transition_rows)
     _write_csv(out_dir / "relation_flip.csv", RELATION_FLIP_FIELDS, relation_flip_rows)
     _write_csv(out_dir / "enable_suppress.csv", ENABLE_SUPPRESS_FIELDS, enable_suppress_rows)
-    _write_multistate_summary(out_dir / "multistate_summary.md", state_rows, transition_rows, relation_flip_rows, enable_suppress_rows)
+    aggregate_rows = _aggregate_by_depth(out_dir, program)
+    _write_csv(out_dir / "aggregate_by_depth.csv", AGGREGATE_BY_DEPTH_FIELDS, aggregate_rows)
+    _write_multistate_summary(out_dir / "multistate_summary.md", out_dir, aggregate_rows)
     return {
         "program": program,
         "out_dir": str(out_dir),
@@ -185,6 +193,7 @@ def explore_states(
         "state_transitions_csv": str(out_dir / "state_transitions.csv"),
         "relation_flip_csv": str(out_dir / "relation_flip.csv"),
         "enable_suppress_csv": str(out_dir / "enable_suppress.csv"),
+        "aggregate_by_depth_csv": str(out_dir / "aggregate_by_depth.csv"),
         "multistate_summary": str(out_dir / "multistate_summary.md"),
     }
 
@@ -510,67 +519,228 @@ def _to_int(value: object) -> int:
         return 0
 
 
+def _to_float(value: object) -> float:
+    try:
+        return float(str(value))
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _write_multistate_summary(
     path: Path,
-    state_rows: list[dict],
-    transition_rows: list[dict],
-    relation_flip_rows: list[dict],
-    enable_suppress_rows: list[dict],
+    out_dir: Path,
+    aggregate_rows: list[dict],
 ) -> None:
+    state_rows = _read_csv(out_dir / "states.csv")
+    transition_rows = _read_csv(out_dir / "state_transitions.csv")
+    relation_flip_rows = _read_csv(out_dir / "relation_flip.csv")
+    enable_suppress_rows = _read_csv(out_dir / "enable_suppress.csv")
+    state_summaries = _state_summary_rows(state_rows)
+
+    root = next((row for row in state_rows if row.get("state_id") == "S0000"), state_rows[0] if state_rows else {})
+    max_depth = max((_to_int(row.get("depth")) for row in state_rows), default=0)
+    duplicate_states = sum(1 for row in state_rows if _is_true(row.get("is_duplicate")))
+    merge_rate = duplicate_states / len(state_rows) if state_rows else 0.0
     flip_counts = Counter(row.get("flip_kind", "") for row in relation_flip_rows if row.get("flip_kind"))
     relation_counts = Counter(row.get("relation", "") for row in enable_suppress_rows if row.get("relation"))
+    non_same_flips = sum(1 for row in relation_flip_rows if row.get("flip_kind") and row.get("flip_kind") != "same")
+    max_component = max((_to_float(row.get("max_conflict_component")) for row in state_summaries), default=0.0)
     lines = [
-        "# Multistate Summary",
+        "# Multi-State Summary",
         "",
-        f"- states: {len(state_rows)}",
-        f"- transitions: {len(transition_rows)}",
-        f"- relation_flip_rows: {len(relation_flip_rows)}",
-        f"- enable_suppress_rows: {len(enable_suppress_rows)}",
+        "## Overall",
         "",
-        "## Top relation flips",
+        f"- root state hash: {root.get('state_hash', '')}",
+        f"- states explored: {len(state_rows)}",
+        f"- transitions generated: {len(transition_rows)}",
+        f"- duplicate states: {duplicate_states}",
+        f"- merge rate: {_format_percent(merge_rate)}",
+        f"- max depth: {max_depth}",
+        "",
+        "## By depth table",
         "",
     ]
-    lines.extend(_counter_table(["flip_kind", "count"], flip_counts))
-    lines.extend(["", "## Top relation flip edges", ""])
+    lines.extend(_by_depth_table(aggregate_rows))
+    lines.extend(["", "## Enable/Suppress", "", "Enable/suppress counts", ""])
+    lines.extend(_counter_table(["relation", "count"], relation_counts))
+    lines.extend(["", "Top transition_pass -> affected_pass", ""])
     lines.extend(
         _counter_table(
-            ["flip_kind", "transition_pass", "pass_pair", "count"],
-            _top_relation_flip_edges(relation_flip_rows),
+            ["relation", "transition_pass", "affected_pass", "count"],
+            _top_enable_suppress_edges(enable_suppress_rows),
         )
     )
-    lines.extend(["", "## Enable/suppress counts", ""])
-    lines.extend(_counter_table(["relation", "count"], relation_counts))
-    for relation in ["enable", "suppress", "effect_changed"]:
-        title = relation.replace("_", " ")
-        lines.extend(["", f"## Top {title} edges", ""])
-        lines.extend(
-            _counter_table(
-                ["transition_pass", "affected_pass", "count"],
-                _top_enable_suppress_edges(enable_suppress_rows, relation),
-            )
+    lines.extend(["", "## Relation Flips", "", "Top relation flips", ""])
+    lines.extend(_counter_table(["flip_kind", "count"], flip_counts))
+    lines.extend(["", "Top examples", ""])
+    lines.extend(_relation_flip_examples(relation_flip_rows))
+    lines.extend(["", "## Largest Components", ""])
+    lines.extend(_largest_components_table(state_summaries))
+    lines.extend(["", "## Interpretation", ""])
+    if non_same_flips:
+        lines.append(
+            f"- relation is state-dependent: yes, observed {non_same_flips} non-same relation flips across explored transitions."
         )
+    else:
+        lines.append("- relation is state-dependent: no non-same relation flips were observed in this run.")
+    if max_component:
+        lines.append(f"- conflict components remain small: largest observed component has {max_component:g} passes.")
+    else:
+        lines.append("- conflict components remain small: no conflict component larger than zero was observed.")
+    lines.append(
+        "- refine next: increase max_depth or switch frontier policy to sensitive-first/top-k-change to test whether these state-dependent edges persist."
+    )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def _top_relation_flip_edges(rows: list[dict]) -> Counter:
-    selected = [row for row in rows if row.get("flip_kind") != "same"]
-    if not selected:
-        selected = rows
-    return Counter(
-        (
-            row.get("flip_kind", ""),
-            row.get("transition_pass", ""),
-            f"{row.get('pass_a', '')} + {row.get('pass_b', '')}",
+def _aggregate_by_depth(out_dir: Path, program: str) -> list[dict]:
+    state_rows = _read_csv(out_dir / "states.csv")
+    transition_rows = _read_csv(out_dir / "state_transitions.csv")
+    enable_rows = _read_csv(out_dir / "enable_suppress.csv")
+    flip_rows = _read_csv(out_dir / "relation_flip.csv")
+    state_summaries = _state_summary_rows(state_rows)
+    state_depths = {row.get("state_id", ""): str(row.get("depth", "")) for row in state_rows}
+
+    depths = sorted({_to_int(row.get("depth")) for row in state_rows})
+    aggregate_rows = []
+    for depth in depths:
+        depth_key = str(depth)
+        summaries = [row for row in state_summaries if str(row.get("depth", "")) == depth_key]
+        transitions = [row for row in transition_rows if str(row.get("depth", "")) == depth_key]
+        enable_at_depth = [row for row in enable_rows if state_depths.get(row.get("child_state_id", "")) == depth_key]
+        flips_at_depth = [row for row in flip_rows if state_depths.get(row.get("child_state_id", "")) == depth_key]
+        cache_hits_from_states = sum(
+            1 for row in state_rows if str(row.get("depth", "")) == depth_key and _is_true(row.get("is_duplicate"))
         )
-        for row in selected
+        cache_hits_from_transitions = sum(1 for row in transitions if _is_true(row.get("is_duplicate")))
+
+        aggregate_rows.append(
+            {
+                "program": program,
+                "depth": depth_key,
+                "num_states": str(len(summaries)),
+                "avg_active_passes": _format_float(_avg(_metric_values(summaries, "active_passes"))),
+                "avg_dormant_passes": _format_float(_avg(_metric_values(summaries, "dormant_passes"))),
+                "avg_pairs_tested": _format_float(_avg(_metric_values(summaries, "pairs_tested"))),
+                "avg_dynamic_commute": _format_float(_avg(_metric_values(summaries, "dynamic_commute"))),
+                "avg_order_sensitive": _format_float(_avg(_metric_values(summaries, "order_sensitive"))),
+                "avg_unknown": _format_float(_avg(_metric_values(summaries, "unknown"))),
+                "avg_max_conflict_component": _format_float(_avg(_metric_values(summaries, "max_conflict_component"))),
+                "state_cache_hits": str(max(cache_hits_from_states, cache_hits_from_transitions)),
+                "enable_count": str(_count_relation(enable_at_depth, "enable")),
+                "suppress_count": str(_count_relation(enable_at_depth, "suppress")),
+                "effect_changed_count": str(_count_relation(enable_at_depth, "effect_changed")),
+                "relation_flip_count": str(_count_flips(flips_at_depth)),
+                "commute_to_sensitive": str(_count_flip_kind(flips_at_depth, "commute_to_sensitive")),
+                "sensitive_to_commute": str(_count_flip_kind(flips_at_depth, "sensitive_to_commute")),
+                "missing_to_active_pair": str(_count_flip_kind(flips_at_depth, "missing_to_active_pair")),
+                "active_pair_to_missing": str(_count_flip_kind(flips_at_depth, "active_pair_to_missing")),
+                "total_time_ms": _format_float(sum(_metric_values(summaries, "total_time_ms"))),
+            }
+        )
+    return aggregate_rows
+
+
+def _state_summary_rows(state_rows: list[dict]) -> list[dict]:
+    summaries = []
+    for state in state_rows:
+        summary = dict(_first_row(Path(state.get("state_dir", "")) / "per_state_summary.csv"))
+        summary.update(
+            {
+                "program": state.get("program", summary.get("program", "")),
+                "state_id": state.get("state_id", summary.get("state_id", "")),
+                "state_hash": state.get("state_hash", summary.get("state_hash", "")),
+                "depth": state.get("depth", summary.get("depth", "")),
+                "state_dir": state.get("state_dir", ""),
+                "is_duplicate": state.get("is_duplicate", ""),
+                "duplicate_of": state.get("duplicate_of", ""),
+            }
+        )
+        for field in ["active_passes", "pairs_tested", "dynamic_commute", "order_sensitive", "unknown", "max_conflict_component", "total_time_ms"]:
+            if not summary.get(field):
+                summary[field] = state.get(field, "")
+        summaries.append(summary)
+    return summaries
+
+
+def _metric_values(rows: list[dict], field: str) -> list[float]:
+    return [_to_float(row.get(field)) for row in rows]
+
+
+def _avg(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    return sum(values) / len(values)
+
+
+def _count_relation(rows: list[dict], relation: str) -> int:
+    return sum(1 for row in rows if row.get("relation") == relation)
+
+
+def _count_flip_kind(rows: list[dict], flip_kind: str) -> int:
+    return sum(1 for row in rows if row.get("flip_kind") == flip_kind)
+
+
+def _count_flips(rows: list[dict]) -> int:
+    return sum(1 for row in rows if row.get("flip_kind") and row.get("flip_kind") != "same")
+
+
+def _by_depth_table(aggregate_rows: list[dict]) -> list[str]:
+    rows = [
+        [
+            row.get("depth", ""),
+            row.get("num_states", ""),
+            row.get("avg_active_passes", ""),
+            row.get("avg_pairs_tested", ""),
+            row.get("avg_dynamic_commute", ""),
+            row.get("avg_order_sensitive", ""),
+            row.get("avg_max_conflict_component", ""),
+        ]
+        for row in aggregate_rows
+    ]
+    return _markdown_table(
+        ["depth", "states", "avg active", "avg pairs", "avg commute", "avg sensitive", "avg max component"],
+        rows,
     )
 
 
-def _top_enable_suppress_edges(rows: list[dict], relation: str) -> Counter:
+def _relation_flip_examples(rows: list[dict]) -> list[str]:
+    selected = [row for row in rows if row.get("flip_kind") != "same"]
+    if not selected:
+        selected = rows
+    table_rows = [
+        [
+            row.get("child_state_id", ""),
+            row.get("transition_pass", ""),
+            f"{row.get('pass_a', '')} + {row.get('pass_b', '')}",
+            row.get("parent_relation", ""),
+            row.get("child_relation", ""),
+            row.get("flip_kind", ""),
+        ]
+        for row in selected[:10]
+    ]
+    return _markdown_table(["child", "transition", "pair", "parent", "child relation", "flip_kind"], table_rows)
+
+
+def _largest_components_table(rows: list[dict]) -> list[str]:
+    ordered = sorted(rows, key=lambda row: _to_float(row.get("max_conflict_component")), reverse=True)[:10]
+    table_rows = [
+        [
+            row.get("state_id", ""),
+            row.get("depth", ""),
+            _format_float(_to_float(row.get("max_conflict_component"))),
+            _format_float(_to_float(row.get("active_passes"))),
+        ]
+        for row in ordered
+    ]
+    return _markdown_table(["state_id", "depth", "max component", "active passes"], table_rows)
+
+
+def _top_enable_suppress_edges(rows: list[dict]) -> Counter:
     return Counter(
-        (row.get("transition_pass", ""), row.get("affected_pass", ""))
+        (row.get("relation", ""), row.get("transition_pass", ""), row.get("affected_pass", ""))
         for row in rows
-        if row.get("relation") == relation
+        if row.get("relation") in {"enable", "suppress", "effect_changed"}
     )
 
 
@@ -584,3 +754,19 @@ def _counter_table(headers: list[str], counter: Counter) -> list[str]:
         cells.append(str(count))
         lines.append(f"| {' | '.join(cells)} |")
     return lines
+
+
+def _markdown_table(headers: list[str], rows: list[list[str]]) -> list[str]:
+    if not rows:
+        return ["none"]
+    lines = [f"| {' | '.join(headers)} |", f"| {' | '.join(['---'] * len(headers))} |"]
+    lines.extend(f"| {' | '.join(row)} |" for row in rows)
+    return lines
+
+
+def _format_float(value: float) -> str:
+    return f"{value:.2f}"
+
+
+def _format_percent(value: float) -> str:
+    return f"{value * 100:.1f}%"

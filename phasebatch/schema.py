@@ -176,6 +176,29 @@ ENABLE_SUPPRESS_FIELDS = [
     "child_changed_functions",
 ]
 
+AGGREGATE_BY_DEPTH_FIELDS = [
+    "program",
+    "depth",
+    "num_states",
+    "avg_active_passes",
+    "avg_dormant_passes",
+    "avg_pairs_tested",
+    "avg_dynamic_commute",
+    "avg_order_sensitive",
+    "avg_unknown",
+    "avg_max_conflict_component",
+    "state_cache_hits",
+    "enable_count",
+    "suppress_count",
+    "effect_changed_count",
+    "relation_flip_count",
+    "commute_to_sensitive",
+    "sensitive_to_commute",
+    "missing_to_active_pair",
+    "active_pair_to_missing",
+    "total_time_ms",
+]
+
 
 @dataclass
 class RunResult:

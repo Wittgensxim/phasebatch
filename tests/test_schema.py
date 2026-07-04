@@ -1,6 +1,7 @@
 import unittest
 
 from phasebatch.schema import (
+    AGGREGATE_BY_DEPTH_FIELDS,
     ENABLE_SUPPRESS_FIELDS,
     PAIR_RELATION_FIELDS,
     PASS_PROFILE_FIELDS,
@@ -97,5 +98,32 @@ class SchemaTests(unittest.TestCase):
                 "child_blocks_changed",
                 "parent_changed_functions",
                 "child_changed_functions",
+            ],
+        )
+
+    def test_aggregate_by_depth_schema_is_present(self) -> None:
+        self.assertEqual(
+            AGGREGATE_BY_DEPTH_FIELDS,
+            [
+                "program",
+                "depth",
+                "num_states",
+                "avg_active_passes",
+                "avg_dormant_passes",
+                "avg_pairs_tested",
+                "avg_dynamic_commute",
+                "avg_order_sensitive",
+                "avg_unknown",
+                "avg_max_conflict_component",
+                "state_cache_hits",
+                "enable_count",
+                "suppress_count",
+                "effect_changed_count",
+                "relation_flip_count",
+                "commute_to_sensitive",
+                "sensitive_to_commute",
+                "missing_to_active_pair",
+                "active_pair_to_missing",
+                "total_time_ms",
             ],
         )
