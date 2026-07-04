@@ -34,6 +34,19 @@ def build_parser() -> argparse.ArgumentParser:
     batch.add_argument("--inputs", required=True, nargs="+", help="Input .c or .ll files.")
     batch.set_defaults(func=_run_batch)
 
+    explore = subparsers.add_parser("explore", help="Explore multiple IR states.")
+    _add_common_args(explore)
+    explore.add_argument("--input", required=True, help="Input .c or .ll file.")
+    explore.add_argument("--max-depth", type=int, default=1, help="Maximum exploration depth.")
+    explore.add_argument(
+        "--frontier-policy",
+        choices=["all-active", "top-k-change", "sensitive-first"],
+        default="all-active",
+        help="Policy for choosing successor states.",
+    )
+    explore.add_argument("--top-k", type=int, default=5, help="Frontier cap for top-k policies.")
+    explore.set_defaults(func=_run_explore)
+
     return parser
 
 
@@ -77,6 +90,27 @@ def _run_batch(args: argparse.Namespace) -> int:
         max_pairs=args.max_pairs,
     )
     print(f"batch analyzed {len(result['program_dirs'])} programs: {result['aggregate_summary']}")
+    return 0
+
+
+def _run_explore(args: argparse.Namespace) -> int:
+    from .explorer import explore_states
+
+    result = explore_states(
+        Path(args.input),
+        Path(args.out),
+        Path(args.passes),
+        jobs=args.jobs,
+        timeout=args.timeout,
+        max_pairs=args.max_pairs,
+        max_depth=args.max_depth,
+        frontier_policy=args.frontier_policy,
+        top_k=args.top_k,
+    )
+    print(
+        "explored {program}: states={states} transitions={transitions} "
+        "states_csv={states_csv}".format(**result)
+    )
     return 0
 
 

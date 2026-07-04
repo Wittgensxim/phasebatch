@@ -110,6 +110,43 @@ PER_STATE_SUMMARY_FIELDS = [
 VALID_PASS_FIELDS = ["pass", "valid", "reason", "test_time_ms"]
 INVALID_PASS_FIELDS = ["pass", "valid", "reason", "test_time_ms"]
 
+STATE_FIELDS = [
+    "program",
+    "state_id",
+    "state_hash",
+    "depth",
+    "parent_state_id",
+    "transition_pass",
+    "ir_path",
+    "state_dir",
+    "is_duplicate",
+    "duplicate_of",
+    "active_passes",
+    "pairs_tested",
+    "dynamic_commute",
+    "order_sensitive",
+    "unknown",
+    "max_conflict_component",
+    "total_time_ms",
+]
+
+STATE_TRANSITION_FIELDS = [
+    "program",
+    "parent_state_id",
+    "child_state_id",
+    "parent_hash",
+    "child_hash",
+    "transition_pass",
+    "depth",
+    "active",
+    "inst_before",
+    "inst_after",
+    "inst_delta",
+    "is_duplicate",
+    "duplicate_of",
+    "ir_path",
+]
+
 
 @dataclass
 class RunResult:

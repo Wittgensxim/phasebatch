@@ -32,6 +32,16 @@ python -m phasebatch batch \
   --jobs 8 \
   --timeout 10 \
   --max-pairs 300
+
+python -m phasebatch explore \
+  --input benchmarks/tiny/branch.c \
+  --out outputs/explore_branch \
+  --passes configs/core_passes.yaml \
+  --max-depth 1 \
+  --frontier-policy all-active \
+  --jobs 8 \
+  --timeout 10 \
+  --max-pairs 300
 ```
 
 On this machine, use the DLM Conda environment:
@@ -58,3 +68,5 @@ Each `analyze` output directory contains:
 - `artifacts/`
 
 The `batch` command also writes aggregate CSVs and `aggregate_summary.md`.
+The `explore` command writes `states.csv`, `state_transitions.csv`, and one
+analysis directory per state under `states/`.
