@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from phasebatch.explorer import _classify_enable_suppress, _classify_relation_flip, explore_states
+from phasebatch.explorer import _aggregate_by_depth, _classify_enable_suppress, _classify_relation_flip, _write_multistate_summary, explore_states
 
 
 class ExplorerTests(unittest.TestCase):
@@ -294,7 +294,8 @@ class ExplorerTests(unittest.TestCase):
         self.assertEqual(len(enable_suppress), 4)
         self.assertIn("suppress", {row["relation"] for row in enable_suppress})
         self.assertIn("effect_changed", {row["relation"] for row in enable_suppress})
-        self.assertIn("Top relation flips", multistate_summary)
+        self.assertIn("Pair availability changes", multistate_summary)
+        self.assertIn("True relation flips among pairs active in both states", multistate_summary)
         self.assertIn("Enable/suppress counts", multistate_summary)
         self.assertEqual([row["depth"] for row in aggregate_by_depth], ["0", "1"])
         self.assertEqual(aggregate_by_depth[0]["num_states"], "1")
@@ -305,6 +306,8 @@ class ExplorerTests(unittest.TestCase):
         self.assertEqual(aggregate_by_depth[1]["suppress_count"], "2")
         self.assertEqual(aggregate_by_depth[1]["effect_changed_count"], "2")
         self.assertEqual(aggregate_by_depth[1]["relation_flip_count"], "2")
+        self.assertEqual(aggregate_by_depth[1]["pair_availability_change_count"], "0")
+        self.assertEqual(aggregate_by_depth[1]["true_relation_flip_count"], "2")
         self.assertEqual(aggregate_by_depth[1]["commute_to_sensitive"], "2")
         self.assertEqual(aggregate_by_depth[1]["total_time_ms"], "14.00")
         self.assertIn("## Overall", multistate_summary)
@@ -319,6 +322,115 @@ class ExplorerTests(unittest.TestCase):
         self.assertEqual(result["aggregate_by_depth_csv"], str(out_dir / "aggregate_by_depth.csv"))
         self.assertEqual(result["multistate_summary"], str(out_dir / "multistate_summary.md"))
 
+    def test_relation_flip_aggregate_splits_availability_from_true_flips(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            state0 = out_dir / "states" / "S0000"
+            state1 = out_dir / "states" / "S0001"
+            state0.mkdir(parents=True)
+            state1.mkdir(parents=True)
+            _write_csv(
+                out_dir / "states.csv",
+                [
+                    "program",
+                    "state_id",
+                    "state_hash",
+                    "depth",
+                    "parent_state_id",
+                    "transition_pass",
+                    "ir_path",
+                    "state_dir",
+                    "is_duplicate",
+                    "duplicate_of",
+                    "active_passes",
+                    "pairs_tested",
+                    "dynamic_commute",
+                    "order_sensitive",
+                    "unknown",
+                    "max_conflict_component",
+                    "total_time_ms",
+                ],
+                [
+                    {
+                        "program": "split",
+                        "state_id": "S0000",
+                        "state_hash": "root",
+                        "depth": "0",
+                        "parent_state_id": "",
+                        "transition_pass": "",
+                        "ir_path": "root.ll",
+                        "state_dir": str(state0),
+                        "is_duplicate": "false",
+                        "duplicate_of": "",
+                        "active_passes": "2",
+                        "pairs_tested": "1",
+                        "dynamic_commute": "1",
+                        "order_sensitive": "0",
+                        "unknown": "0",
+                        "max_conflict_component": "0",
+                        "total_time_ms": "1",
+                    },
+                    {
+                        "program": "split",
+                        "state_id": "S0001",
+                        "state_hash": "child",
+                        "depth": "1",
+                        "parent_state_id": "S0000",
+                        "transition_pass": "pass-a",
+                        "ir_path": "child.ll",
+                        "state_dir": str(state1),
+                        "is_duplicate": "false",
+                        "duplicate_of": "",
+                        "active_passes": "2",
+                        "pairs_tested": "1",
+                        "dynamic_commute": "0",
+                        "order_sensitive": "1",
+                        "unknown": "0",
+                        "max_conflict_component": "2",
+                        "total_time_ms": "2",
+                    },
+                ],
+            )
+            _write_csv(
+                out_dir / "state_transitions.csv",
+                ["program", "parent_state_id", "child_state_id", "parent_hash", "child_hash", "transition_pass", "depth", "is_duplicate"],
+                [{"program": "split", "parent_state_id": "S0000", "child_state_id": "S0001", "parent_hash": "root", "child_hash": "child", "transition_pass": "pass-a", "depth": "1", "is_duplicate": "false"}],
+            )
+            _write_csv(out_dir / "enable_suppress.csv", ["program", "child_state_id", "relation"], [])
+            _write_csv(
+                out_dir / "relation_flip.csv",
+                ["program", "parent_state_id", "child_state_id", "transition_pass", "pass_a", "pass_b", "parent_relation", "child_relation", "flip_kind"],
+                [
+                    _flip("split", "S0001", "a", "b", "active_pair_to_missing"),
+                    _flip("split", "S0001", "a", "c", "missing_to_active_pair"),
+                    _flip("split", "S0001", "a", "d", "commute_to_sensitive"),
+                    _flip("split", "S0001", "a", "e", "sensitive_to_commute"),
+                    _flip("split", "S0001", "a", "f", "known_to_unknown"),
+                    _flip("split", "S0001", "a", "g", "unknown_to_known"),
+                    _flip("split", "S0001", "a", "h", "other_flip"),
+                    _flip("split", "S0001", "a", "i", "same"),
+                ],
+            )
+            for state_dir, state_id, depth in [(state0, "S0000", "0"), (state1, "S0001", "1")]:
+                _write_csv(
+                    state_dir / "per_state_summary.csv",
+                    ["program", "state_id", "depth", "active_passes", "dormant_passes", "pairs_tested", "dynamic_commute", "order_sensitive", "unknown", "max_conflict_component", "total_time_ms"],
+                    [{"program": "split", "state_id": state_id, "depth": depth, "active_passes": "2", "dormant_passes": "0", "pairs_tested": "1", "dynamic_commute": "0", "order_sensitive": "1", "unknown": "0", "max_conflict_component": "2", "total_time_ms": "2"}],
+                )
+
+            aggregate_rows = _aggregate_by_depth(out_dir, "split")
+            _write_csv(out_dir / "aggregate_by_depth.csv", list(aggregate_rows[0].keys()), aggregate_rows)
+            _write_multistate_summary(out_dir / "multistate_summary.md", out_dir, aggregate_rows)
+            summary_text = (out_dir / "multistate_summary.md").read_text(encoding="utf-8")
+
+        depth1 = aggregate_rows[1]
+        self.assertEqual(depth1["relation_flip_count"], "7")
+        self.assertEqual(depth1["pair_availability_change_count"], "2")
+        self.assertEqual(depth1["true_relation_flip_count"], "5")
+        self.assertIn("pair availability changes", summary_text)
+        self.assertIn("true relation flips among pairs active in both states", summary_text)
+        self.assertNotIn("non-same relation flips", summary_text)
+
 
 def _write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, str]]) -> None:
     with path.open("w", encoding="utf-8", newline="") as handle:
@@ -330,3 +442,17 @@ def _write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, str]]) ->
 def _read_csv(path: Path) -> list[dict[str, str]]:
     with path.open(encoding="utf-8", newline="") as handle:
         return list(csv.DictReader(handle))
+
+
+def _flip(program: str, child_state_id: str, pass_a: str, pass_b: str, flip_kind: str) -> dict[str, str]:
+    return {
+        "program": program,
+        "parent_state_id": "S0000",
+        "child_state_id": child_state_id,
+        "transition_pass": "pass-a",
+        "pass_a": pass_a,
+        "pass_b": pass_b,
+        "parent_relation": "parent",
+        "child_relation": "child",
+        "flip_kind": flip_kind,
+    }

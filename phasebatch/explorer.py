@@ -19,6 +19,16 @@ from .schema import (
 from .tools import collect_toolchain, write_metadata
 
 
+PAIR_AVAILABILITY_CHANGE_KINDS = {"active_pair_to_missing", "missing_to_active_pair"}
+TRUE_RELATION_FLIP_KINDS = {
+    "commute_to_sensitive",
+    "sensitive_to_commute",
+    "known_to_unknown",
+    "unknown_to_known",
+    "other_flip",
+}
+
+
 def explore_states(
     input_path: Path,
     out_dir: Path,
@@ -543,7 +553,8 @@ def _write_multistate_summary(
     merge_rate = duplicate_states / len(state_rows) if state_rows else 0.0
     flip_counts = Counter(row.get("flip_kind", "") for row in relation_flip_rows if row.get("flip_kind"))
     relation_counts = Counter(row.get("relation", "") for row in enable_suppress_rows if row.get("relation"))
-    non_same_flips = sum(1 for row in relation_flip_rows if row.get("flip_kind") and row.get("flip_kind") != "same")
+    pair_availability_changes = _count_pair_availability_changes(relation_flip_rows)
+    true_relation_flips = _count_true_relation_flips(relation_flip_rows)
     max_component = max((_to_float(row.get("max_conflict_component")) for row in state_summaries), default=0.0)
     lines = [
         "# Multi-State Summary",
@@ -570,19 +581,40 @@ def _write_multistate_summary(
             _top_enable_suppress_edges(enable_suppress_rows),
         )
     )
-    lines.extend(["", "## Relation Flips", "", "Top relation flips", ""])
-    lines.extend(_counter_table(["flip_kind", "count"], flip_counts))
+    lines.extend(["", "## Relation Flips", "", "Pair availability changes", ""])
+    lines.append(f"total pair availability changes: {pair_availability_changes}")
+    lines.extend(
+        _counter_table(
+            ["flip_kind", "count"],
+            Counter({key: flip_counts[key] for key in PAIR_AVAILABILITY_CHANGE_KINDS if flip_counts[key]}),
+        )
+    )
+    lines.extend(["", "True relation flips among pairs active in both states", ""])
+    lines.append(f"total true relation flips: {true_relation_flips}")
+    lines.extend(
+        _counter_table(
+            ["flip_kind", "count"],
+            Counter({key: flip_counts[key] for key in TRUE_RELATION_FLIP_KINDS if flip_counts[key]}),
+        )
+    )
     lines.extend(["", "Top examples", ""])
     lines.extend(_relation_flip_examples(relation_flip_rows))
     lines.extend(["", "## Largest Components", ""])
     lines.extend(_largest_components_table(state_summaries))
     lines.extend(["", "## Interpretation", ""])
-    if non_same_flips:
+    if true_relation_flips:
         lines.append(
-            f"- relation is state-dependent: yes, observed {non_same_flips} non-same relation flips across explored transitions."
+            "- relation is state-dependent: yes, observed "
+            f"{true_relation_flips} true relation flips among pairs active in both states "
+            f"and {pair_availability_changes} pair availability changes."
+        )
+    elif pair_availability_changes:
+        lines.append(
+            "- relation is state-dependent: no true relation flips among pairs active in both states were observed; "
+            f"{pair_availability_changes} pair availability changes were observed."
         )
     else:
-        lines.append("- relation is state-dependent: no non-same relation flips were observed in this run.")
+        lines.append("- relation is state-dependent: no pair availability changes or true relation flips were observed in this run.")
     if max_component:
         lines.append(f"- conflict components remain small: largest observed component has {max_component:g} passes.")
     else:
@@ -631,6 +663,8 @@ def _aggregate_by_depth(out_dir: Path, program: str) -> list[dict]:
                 "suppress_count": str(_count_relation(enable_at_depth, "suppress")),
                 "effect_changed_count": str(_count_relation(enable_at_depth, "effect_changed")),
                 "relation_flip_count": str(_count_flips(flips_at_depth)),
+                "pair_availability_change_count": str(_count_pair_availability_changes(flips_at_depth)),
+                "true_relation_flip_count": str(_count_true_relation_flips(flips_at_depth)),
                 "commute_to_sensitive": str(_count_flip_kind(flips_at_depth, "commute_to_sensitive")),
                 "sensitive_to_commute": str(_count_flip_kind(flips_at_depth, "sensitive_to_commute")),
                 "missing_to_active_pair": str(_count_flip_kind(flips_at_depth, "missing_to_active_pair")),
@@ -683,6 +717,14 @@ def _count_flip_kind(rows: list[dict], flip_kind: str) -> int:
 
 def _count_flips(rows: list[dict]) -> int:
     return sum(1 for row in rows if row.get("flip_kind") and row.get("flip_kind") != "same")
+
+
+def _count_pair_availability_changes(rows: list[dict]) -> int:
+    return sum(1 for row in rows if row.get("flip_kind") in PAIR_AVAILABILITY_CHANGE_KINDS)
+
+
+def _count_true_relation_flips(rows: list[dict]) -> int:
+    return sum(1 for row in rows if row.get("flip_kind") in TRUE_RELATION_FLIP_KINDS)
 
 
 def _by_depth_table(aggregate_rows: list[dict]) -> list[str]:

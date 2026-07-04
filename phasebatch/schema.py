@@ -192,6 +192,8 @@ AGGREGATE_BY_DEPTH_FIELDS = [
     "suppress_count",
     "effect_changed_count",
     "relation_flip_count",
+    "pair_availability_change_count",
+    "true_relation_flip_count",
     "commute_to_sensitive",
     "sensitive_to_commute",
     "missing_to_active_pair",
