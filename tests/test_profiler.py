@@ -4,7 +4,6 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from phasebatch.ir_parser import parse_ir_snapshot
 from phasebatch.profiler import profile_passes, validate_passes
 from phasebatch.schema import RunResult
 
@@ -41,10 +40,31 @@ class ProfilerTests(unittest.TestCase):
                 return RunResult([opt], 0, "", "", 2.0)
 
             with mock.patch("phasebatch.profiler.run_opt", side_effect=fake_run_opt):
-                rows = profile_passes(input_ll, ["instcombine"], {"opt": "opt"}, root, jobs=1, timeout=1)
+                rows = profile_passes(
+                    input_ll,
+                    ["instcombine"],
+                    {"opt": "opt"},
+                    root,
+                    jobs=1,
+                    timeout=1,
+                    program="prog",
+                    state_id="S0001",
+                    depth=1,
+                    parent_state_id="S0000",
+                    transition_pass="mem2reg",
+                )
 
             self.assertEqual(rows[0]["active"], "true")
+            self.assertEqual(rows[0]["program"], "prog")
+            self.assertEqual(rows[0]["state_id"], "S0001")
+            self.assertEqual(rows[0]["depth"], 1)
+            self.assertEqual(rows[0]["parent_state_id"], "S0000")
+            self.assertEqual(rows[0]["transition_pass"], "mem2reg")
+            self.assertTrue(rows[0]["output_path"].endswith("instcombine.ll"))
             self.assertEqual(rows[0]["funcs_changed"], 1)
             self.assertEqual(rows[0]["blocks_changed"], 1)
             with (root / "pass_profile.csv").open(encoding="utf-8", newline="") as handle:
-                self.assertEqual(next(csv.DictReader(handle))["pass"], "instcombine")
+                row = next(csv.DictReader(handle))
+                self.assertEqual(row["pass"], "instcombine")
+                self.assertEqual(row["state_id"], "S0001")
+                self.assertTrue(row["output_path"].endswith("instcombine.ll"))

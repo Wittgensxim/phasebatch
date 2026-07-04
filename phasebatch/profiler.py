@@ -59,14 +59,26 @@ def profile_passes(
     out_dir: Path,
     jobs: int,
     timeout: int,
+    *,
+    program: str,
+    state_id: str,
+    depth: int,
+    parent_state_id: str,
+    transition_pass: str,
 ) -> list[dict]:
     out_dir = Path(out_dir)
     artifacts_dir = out_dir / "artifacts" / "single_pass"
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     before = parse_ir_snapshot(input_ll)
-    program = Path(input_ll).parent.name or Path(input_ll).stem
     input_hash = before.module_hash
     inst_before = before.features.get("instructions", 0)
+    state_metadata = {
+        "program": program,
+        "state_id": state_id,
+        "depth": depth,
+        "parent_state_id": parent_state_id,
+        "transition_pass": transition_pass,
+    }
 
     def run_one(pass_name: str) -> dict:
         output_ll = artifacts_dir / f"{_safe_name(pass_name)}.ll"
@@ -78,13 +90,14 @@ def profile_passes(
             inst_after = after.features.get("instructions", 0)
             active = output_hash != input_hash
             return {
-                "program": program,
+                **state_metadata,
                 "state_hash": input_hash,
                 "pass": pass_name,
                 "success": "true",
                 "active": _bool(active),
                 "input_hash": input_hash,
                 "output_hash": output_hash,
+                "output_path": str(output_ll),
                 "inst_before": inst_before,
                 "inst_after": inst_after,
                 "inst_delta": inst_after - inst_before,
@@ -98,13 +111,14 @@ def profile_passes(
             }
 
         return {
-            "program": program,
+            **state_metadata,
             "state_hash": input_hash,
             "pass": pass_name,
             "success": "false",
             "active": "false",
             "input_hash": input_hash,
             "output_hash": "",
+            "output_path": "",
             "inst_before": inst_before,
             "inst_after": "",
             "inst_delta": "",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import json
 import time
 from pathlib import Path
 
@@ -87,7 +88,6 @@ def run_analysis(
     timeout: int,
     max_pairs: int | None,
 ) -> dict:
-    start = time.perf_counter()
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     configured_passes = load_passes(passes_path)
@@ -115,8 +115,88 @@ def run_analysis(
 
     valid_passes, invalid_rows = validate_passes(input_ll, configured_passes, tools, out_dir, timeout)
 
+    result = analyze_state(
+        input_ll,
+        out_dir,
+        tools,
+        valid_passes=valid_passes,
+        invalid_rows=invalid_rows,
+        configured_pass_count=len(configured_passes),
+        jobs=jobs,
+        timeout=timeout,
+        max_pairs=max_pairs,
+        program=program,
+        state_id="S0000",
+        depth=0,
+        parent_state_id="",
+        transition_pass="",
+    )
+
+    metadata = _read_metadata(out_dir)
+    metadata.update(
+        {
+            "valid_passes": result.get("valid_passes"),
+            "invalid_passes": result.get("invalid_passes"),
+            "active_passes": result.get("active_passes"),
+            "pair_rows": result.get("pair_rows"),
+            "summary": result.get("summary_path"),
+            "total_time_ms": result.get("total_time_ms"),
+        }
+    )
+    write_metadata(out_dir, metadata)
+    return result
+
+
+def analyze_state(
+    input_ll: Path,
+    out_dir: Path,
+    tools: dict,
+    *,
+    valid_passes: list[str],
+    invalid_rows: list[dict],
+    configured_pass_count: int,
+    jobs: int,
+    timeout: int,
+    max_pairs: int | None,
+    program: str,
+    state_id: str,
+    depth: int,
+    parent_state_id: str,
+    transition_pass: str,
+) -> dict:
+    start = time.perf_counter()
+    input_ll = Path(input_ll)
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    state_hash = canonical_hash(input_ll)
+
+    metadata = _read_metadata(out_dir)
+    metadata.update(
+        {
+            "input": str(input_ll),
+            "state_hash": state_hash,
+            "state_id": state_id,
+            "depth": depth,
+            "parent_state_id": parent_state_id,
+            "transition_pass": transition_pass,
+        }
+    )
+    write_metadata(out_dir, metadata)
+
     profile_start = time.perf_counter()
-    profile_rows = profile_passes(input_ll, valid_passes, tools, out_dir, jobs, timeout)
+    profile_rows = profile_passes(
+        input_ll,
+        valid_passes,
+        tools,
+        out_dir,
+        jobs,
+        timeout,
+        program=program,
+        state_id=state_id,
+        depth=depth,
+        parent_state_id=parent_state_id,
+        transition_pass=transition_pass,
+    )
     profile_time_ms = (time.perf_counter() - profile_start) * 1000
     active_profiles = [row for row in profile_rows if row.get("success") == "true" and row.get("active") == "true"]
 
@@ -135,7 +215,11 @@ def run_analysis(
         out_dir,
         program,
         state_hash,
-        pass_set_size=len(configured_passes),
+        state_id=state_id,
+        depth=depth,
+        parent_state_id=parent_state_id,
+        transition_pass=transition_pass,
+        pass_set_size=configured_pass_count,
         valid_passes=len(valid_passes),
         invalid_passes=len(invalid_rows),
         profile_time_ms=profile_time_ms,
@@ -158,10 +242,15 @@ def run_analysis(
     return {
         "program": program,
         "out_dir": str(out_dir),
+        "state_id": state_id,
+        "depth": depth,
+        "parent_state_id": parent_state_id,
+        "transition_pass": transition_pass,
         "valid_passes": len(valid_passes),
         "active_passes": len(active_profiles),
         "pair_rows": len(pair_rows),
         "summary_path": str(summary),
+        "total_time_ms": total_time_ms,
     }
 
 
@@ -198,6 +287,13 @@ def _tool_paths(metadata: dict) -> dict[str, str]:
         for name, details in metadata.get("tools", {}).items()
         if details.get("path")
     }
+
+
+def _read_metadata(out_dir: Path) -> dict:
+    path = Path(out_dir) / "metadata.json"
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _expand_inputs(inputs: list[str]) -> list[Path]:

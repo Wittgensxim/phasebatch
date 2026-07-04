@@ -104,6 +104,10 @@ def _ordered_pairs(active_profiles: list[dict]) -> list[tuple[str, str]]:
 def _base_row(input_ll: Path, profile_a: dict, profile_b: dict, ab_path: Path, ba_path: Path) -> dict:
     return {
         "program": profile_a.get("program") or Path(input_ll).parent.name or Path(input_ll).stem,
+        "state_id": profile_a.get("state_id", ""),
+        "depth": profile_a.get("depth", ""),
+        "parent_state_id": profile_a.get("parent_state_id", ""),
+        "transition_pass": profile_a.get("transition_pass", ""),
         "state_hash": profile_a.get("state_hash", ""),
         "pass_a": profile_a["pass"],
         "pass_b": profile_b["pass"],

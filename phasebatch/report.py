@@ -99,6 +99,10 @@ def write_per_state_summary(
     out_dir: Path,
     program: str,
     state_hash: str,
+    state_id: str,
+    depth: int,
+    parent_state_id: str,
+    transition_pass: str,
     pass_set_size: int,
     valid_passes: int,
     invalid_passes: int,
@@ -117,6 +121,10 @@ def write_per_state_summary(
     dormant_count = sum(1 for row in profiles if row.get("success") == "true" and not _is_true(row.get("active")))
     row = {
         "program": program,
+        "state_id": state_id,
+        "depth": depth,
+        "parent_state_id": parent_state_id,
+        "transition_pass": transition_pass,
         "state_hash": state_hash,
         "pass_set_size": pass_set_size,
         "valid_passes": valid_passes,

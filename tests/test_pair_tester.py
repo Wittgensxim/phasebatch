@@ -14,8 +14,30 @@ class PairTesterTests(unittest.TestCase):
             input_ll = root / "input.ll"
             input_ll.write_text("define i32 @f() {\n  ret i32 0\n}\n", encoding="utf-8")
             profiles = [
-                {"program": "x", "state_hash": "s", "pass": "a", "active": "true", "changed_functions": "f", "changed_blocks": "f::entry"},
-                {"program": "x", "state_hash": "s", "pass": "b", "active": "true", "changed_functions": "f", "changed_blocks": "f::entry"},
+                {
+                    "program": "x",
+                    "state_id": "S0001",
+                    "depth": 1,
+                    "parent_state_id": "S0000",
+                    "transition_pass": "mem2reg",
+                    "state_hash": "s",
+                    "pass": "a",
+                    "active": "true",
+                    "changed_functions": "f",
+                    "changed_blocks": "f::entry",
+                },
+                {
+                    "program": "x",
+                    "state_id": "S0001",
+                    "depth": 1,
+                    "parent_state_id": "S0000",
+                    "transition_pass": "mem2reg",
+                    "state_hash": "s",
+                    "pass": "b",
+                    "active": "true",
+                    "changed_functions": "f",
+                    "changed_blocks": "f::entry",
+                },
             ]
 
             def fake_run_opt(opt, src, passes, out, timeout):
@@ -27,6 +49,10 @@ class PairTesterTests(unittest.TestCase):
 
         self.assertEqual(rows[0]["dynamic_relation"], "dynamic_commute")
         self.assertEqual(rows[0]["same_hash"], "true")
+        self.assertEqual(rows[0]["state_id"], "S0001")
+        self.assertEqual(rows[0]["depth"], 1)
+        self.assertEqual(rows[0]["parent_state_id"], "S0000")
+        self.assertEqual(rows[0]["transition_pass"], "mem2reg")
 
     def test_test_pairs_records_not_tested_when_max_pairs_caps_work(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -34,9 +60,9 @@ class PairTesterTests(unittest.TestCase):
             input_ll = root / "input.ll"
             input_ll.write_text("define i32 @f() {\n  ret i32 0\n}\n", encoding="utf-8")
             profiles = [
-                {"program": "x", "state_hash": "s", "pass": "a", "active": "true", "changed_functions": "f", "changed_blocks": "f::entry"},
-                {"program": "x", "state_hash": "s", "pass": "b", "active": "true", "changed_functions": "g", "changed_blocks": "g::entry"},
-                {"program": "x", "state_hash": "s", "pass": "c", "active": "true", "changed_functions": "h", "changed_blocks": "h::entry"},
+                {"program": "x", "state_id": "S0000", "depth": 0, "parent_state_id": "", "transition_pass": "", "state_hash": "s", "pass": "a", "active": "true", "changed_functions": "f", "changed_blocks": "f::entry"},
+                {"program": "x", "state_id": "S0000", "depth": 0, "parent_state_id": "", "transition_pass": "", "state_hash": "s", "pass": "b", "active": "true", "changed_functions": "g", "changed_blocks": "g::entry"},
+                {"program": "x", "state_id": "S0000", "depth": 0, "parent_state_id": "", "transition_pass": "", "state_hash": "s", "pass": "c", "active": "true", "changed_functions": "h", "changed_blocks": "h::entry"},
             ]
 
             def fake_run_opt(opt, src, passes, out, timeout):
@@ -48,3 +74,4 @@ class PairTesterTests(unittest.TestCase):
 
         self.assertEqual(len(rows), 3)
         self.assertEqual(sum(1 for row in rows if row["dynamic_relation"] == "not_tested"), 2)
+        self.assertTrue(all(row["state_id"] == "S0000" for row in rows))

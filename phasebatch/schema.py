@@ -6,12 +6,17 @@ from pathlib import Path
 
 PASS_PROFILE_FIELDS = [
     "program",
+    "state_id",
+    "depth",
+    "parent_state_id",
+    "transition_pass",
     "state_hash",
     "pass",
     "success",
     "active",
     "input_hash",
     "output_hash",
+    "output_path",
     "inst_before",
     "inst_after",
     "inst_delta",
@@ -26,6 +31,10 @@ PASS_PROFILE_FIELDS = [
 
 PAIR_RELATION_FIELDS = [
     "program",
+    "state_id",
+    "depth",
+    "parent_state_id",
+    "transition_pass",
     "state_hash",
     "pass_a",
     "pass_b",
@@ -73,6 +82,10 @@ CLUSTER_DISTRIBUTION_FIELDS = [
 
 PER_STATE_SUMMARY_FIELDS = [
     "program",
+    "state_id",
+    "depth",
+    "parent_state_id",
+    "transition_pass",
     "state_hash",
     "pass_set_size",
     "valid_passes",
