@@ -2,8 +2,10 @@ import csv
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from phasebatch.batcher import build_batch_family
+from phasebatch.batcher import build_batch_family, validate_batch_candidates
+from phasebatch.schema import RunResult
 
 
 class BatcherTests(unittest.TestCase):
@@ -80,6 +82,71 @@ class BatcherTests(unittest.TestCase):
         self.assertEqual(result["batch_candidates"], 1)
         self.assertEqual(candidates[0]["batch_passes"], "B;A")
 
+    def test_validate_batch_candidates_all_permutations_same_is_strong_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp)
+            _write_input(state_dir)
+            _write_candidates(state_dir, [{"batch_id": "B0000", "batch_passes": "A;B;C", "batch_size": "3", "canonical_order": "A;B;C"}])
+            _write_summary(state_dir)
+
+            def fake_run_opt(opt, src, passes, out, timeout):
+                out.write_text("define i32 @f() {\n  ret i32 0\n}\n", encoding="utf-8")
+                return RunResult([opt], 0, "", "", 1.0)
+
+            with mock.patch("phasebatch.batcher.run_opt", side_effect=fake_run_opt):
+                result = validate_batch_candidates(state_dir, {"opt": "opt"}, timeout=1, jobs=2, max_permutation_factorial=6)
+            rows = _read_csv(state_dir / "batch_validation.csv")
+            summary_text = (state_dir / "batch_summary.md").read_text(encoding="utf-8")
+
+        self.assertEqual(result["validated_batches"], 1)
+        self.assertEqual(rows[0]["tested_orders"], "6")
+        self.assertEqual(rows[0]["same_hash_count"], "6")
+        self.assertEqual(rows[0]["different_hash_count"], "0")
+        self.assertEqual(rows[0]["validation_status"], "all_permutations_same")
+        self.assertIn("all_permutations_same", summary_text)
+
+    def test_validate_batch_candidates_detects_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp)
+            _write_input(state_dir)
+            _write_candidates(state_dir, [{"batch_id": "B0000", "batch_passes": "A;B", "batch_size": "2", "canonical_order": "A;B"}])
+            _write_summary(state_dir)
+
+            def fake_run_opt(opt, src, passes, out, timeout):
+                value = 0 if passes == ["A", "B"] else 1
+                out.write_text(f"define i32 @f() {{\n  ret i32 {value}\n}}\n", encoding="utf-8")
+                return RunResult([opt], 0, "", "", 1.0)
+
+            with mock.patch("phasebatch.batcher.run_opt", side_effect=fake_run_opt):
+                validate_batch_candidates(state_dir, {"opt": "opt"}, timeout=1, jobs=1, max_permutation_factorial=2)
+            rows = _read_csv(state_dir / "batch_validation.csv")
+
+        self.assertEqual(rows[0]["validation_status"], "mismatch")
+        self.assertEqual(rows[0]["tested_orders"], "2")
+        self.assertEqual(rows[0]["same_hash_count"], "1")
+        self.assertEqual(rows[0]["different_hash_count"], "1")
+        self.assertEqual(rows[0]["first_mismatch_order"], "B;A")
+        self.assertTrue(rows[0]["first_mismatch_hash"])
+
+    def test_validate_batch_candidates_samples_large_batches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp)
+            _write_input(state_dir)
+            _write_candidates(state_dir, [{"batch_id": "B0000", "batch_passes": "A;B;C;D;E;F", "batch_size": "6", "canonical_order": "A;B;C;D;E;F"}])
+            _write_summary(state_dir)
+
+            def fake_run_opt(opt, src, passes, out, timeout):
+                out.write_text("define i32 @f() {\n  ret i32 0\n}\n", encoding="utf-8")
+                return RunResult([opt], 0, "", "", 1.0)
+
+            with mock.patch("phasebatch.batcher.run_opt", side_effect=fake_run_opt):
+                validate_batch_candidates(state_dir, {"opt": "opt"}, timeout=1, jobs=2, max_permutation_factorial=2, samples=3)
+            rows = _read_csv(state_dir / "batch_validation.csv")
+
+        self.assertEqual(rows[0]["validation_status"], "sampled_same")
+        self.assertEqual(rows[0]["tested_orders"], "4")
+        self.assertEqual(rows[0]["same_hash_count"], "4")
+
 
 def _write_state(state_dir: Path, passes: list[str], relations: dict[tuple[str, str], str]) -> None:
     _write_csv(
@@ -105,6 +172,39 @@ def _write_state(state_dir: Path, passes: list[str], relations: dict[tuple[str, 
             for (pass_a, pass_b), relation in relations.items()
         ],
     )
+
+
+def _write_input(state_dir: Path) -> None:
+    (state_dir / "input.ll").write_text("define i32 @f() {\n  ret i32 0\n}\n", encoding="utf-8")
+
+
+def _write_candidates(state_dir: Path, rows: list[dict[str, str]]) -> None:
+    fieldnames = [
+        "program",
+        "state_id",
+        "state_hash",
+        "batch_id",
+        "batch_passes",
+        "batch_size",
+        "component_choices",
+        "is_exact",
+        "num_conflict_components",
+        "unresolved_components",
+        "canonical_order",
+    ]
+    for row in rows:
+        row.setdefault("program", "testprog")
+        row.setdefault("state_id", "S0000")
+        row.setdefault("state_hash", "hash0")
+        row.setdefault("component_choices", "")
+        row.setdefault("is_exact", "true")
+        row.setdefault("num_conflict_components", "1")
+        row.setdefault("unresolved_components", "0")
+    _write_csv(state_dir / "batch_candidates.csv", fieldnames, rows)
+
+
+def _write_summary(state_dir: Path) -> None:
+    (state_dir / "batch_summary.md").write_text("# Batch Summary\n", encoding="utf-8")
 
 
 def _all_pairs(passes: list[str], relation: str) -> dict[tuple[str, str], str]:

@@ -47,6 +47,12 @@ python -m phasebatch batchify \
   --state-dir outputs/explore_branch/states/S0000 \
   --max-component-size 10 \
   --max-batch-candidates 200
+
+python -m phasebatch batchify \
+  --state-dir outputs/explore_branch/states/S0000 \
+  --max-component-size 10 \
+  --max-batch-candidates 200 \
+  --validate-batches
 ```
 
 On this machine, use the DLM Conda environment:
@@ -77,4 +83,8 @@ The `explore` command writes `states.csv`, `state_transitions.csv`, and one
 analysis directory per state under `states/`.
 The `batchify` command consumes an existing state directory, reads only
 `pass_profile.csv` and `pair_relation.csv`, and writes `batch_components.csv`,
-`batch_candidates.csv`, `batch_summary.csv`, and `batch_summary.md`. It does not run opt.
+`batch_candidates.csv`, `batch_summary.csv`, and `batch_summary.md`. It does not run opt
+unless `--validate-batches` is set. With validation enabled it runs opt over
+candidate permutations, writes `batch_validation.csv`, and updates
+`batch_summary.md` with validation counts. `all_permutations_same` is strong
+evidence for that candidate; `sampled_same` is empirical evidence only.

@@ -62,6 +62,7 @@ class CliBootstrapTests(unittest.TestCase):
         self.assertIn("--state-dir", result.stdout)
         self.assertIn("--max-component-size", result.stdout)
         self.assertIn("--max-batch-candidates", result.stdout)
+        self.assertIn("--validate-batches", result.stdout)
 
 
 if __name__ == "__main__":

@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import csv
 import itertools
+import json
 import math
+import random
+import time
 from pathlib import Path
 
-from .schema import BATCH_CANDIDATE_FIELDS, BATCH_COMPONENT_FIELDS, BATCH_SUMMARY_FIELDS
+from .normalizer import canonical_hash as hash_ir
+from .runner import run_opt
+from .schema import BATCH_CANDIDATE_FIELDS, BATCH_COMPONENT_FIELDS, BATCH_SUMMARY_FIELDS, BATCH_VALIDATION_FIELDS
 
 
 def build_batch_family(
@@ -115,6 +122,44 @@ def build_batch_family(
         "batch_candidates_csv": str(state_dir / "batch_candidates.csv"),
         "batch_summary_csv": str(state_dir / "batch_summary.csv"),
         "batch_summary_md": str(state_dir / "batch_summary.md"),
+    }
+
+
+def validate_batch_candidates(
+    state_dir: Path,
+    tools: dict,
+    timeout: int,
+    jobs: int,
+    max_permutation_factorial: int = 120,
+    samples: int = 20,
+) -> dict:
+    state_dir = Path(state_dir)
+    candidates = _read_csv(state_dir / "batch_candidates.csv")
+    input_ll = _state_input_ll(state_dir)
+    validation_root = state_dir / "artifacts" / "batch_validation"
+    rows = []
+
+    for candidate in candidates:
+        rows.append(
+            _validate_one_batch(
+                candidate,
+                input_ll,
+                validation_root,
+                tools,
+                timeout,
+                jobs,
+                max_permutation_factorial,
+                samples,
+            )
+        )
+
+    _write_csv(state_dir / "batch_validation.csv", BATCH_VALIDATION_FIELDS, rows)
+    _append_validation_summary(state_dir / "batch_summary.md", rows)
+    status_counts = Counter(row["validation_status"] for row in rows)
+    return {
+        "validated_batches": len(rows),
+        "validation_status_counts": dict(status_counts),
+        "batch_validation_csv": str(state_dir / "batch_validation.csv"),
     }
 
 
@@ -256,6 +301,190 @@ def _summary_row(
     }
 
 
+def _validate_one_batch(
+    candidate: dict,
+    input_ll: Path | None,
+    validation_root: Path,
+    tools: dict,
+    timeout: int,
+    jobs: int,
+    max_permutation_factorial: int,
+    samples: int,
+) -> dict:
+    start = time.perf_counter()
+    passes = _split_passes(candidate.get("canonical_order") or candidate.get("batch_passes"))
+    base_row = {
+        "program": candidate.get("program", ""),
+        "state_id": candidate.get("state_id", ""),
+        "state_hash": candidate.get("state_hash", ""),
+        "batch_id": candidate.get("batch_id", ""),
+        "batch_size": candidate.get("batch_size", str(len(passes))),
+        "canonical_order": _join_order(passes),
+        "tested_orders": "0",
+        "same_hash_count": "0",
+        "different_hash_count": "0",
+        "validation_status": "not_validated",
+        "canonical_hash": "",
+        "first_mismatch_order": "",
+        "first_mismatch_hash": "",
+        "time_ms": "0.00",
+    }
+    opt = tools.get("opt")
+    if not input_ll or not input_ll.exists() or not opt or not passes:
+        base_row["time_ms"] = _elapsed_ms(start)
+        return base_row
+
+    batch_dir = validation_root / _safe_name(candidate.get("batch_id", "batch"))
+    batch_dir.mkdir(parents=True, exist_ok=True)
+    canonical_output = batch_dir / "canonical.ll"
+    canonical_result = run_opt(opt, input_ll, passes, canonical_output, timeout)
+    base_row["tested_orders"] = "1"
+    if not canonical_result.success or not canonical_output.exists():
+        base_row["validation_status"] = "failed"
+        base_row["time_ms"] = _elapsed_ms(start)
+        return base_row
+
+    canonical_digest = hash_ir(canonical_output)
+    base_row["canonical_hash"] = canonical_digest
+    same_count = 1
+    different_count = 0
+    first_mismatch_order = ""
+    first_mismatch_hash = ""
+
+    validation_orders, exhaustive = _validation_orders(passes, max_permutation_factorial, samples)
+    order_results = _run_validation_orders(
+        opt,
+        input_ll,
+        validation_orders,
+        batch_dir,
+        timeout,
+        max(1, jobs),
+    )
+    failed = False
+    for result in order_results:
+        if not result["success"]:
+            failed = True
+            continue
+        if result["hash"] == canonical_digest:
+            same_count += 1
+        else:
+            different_count += 1
+            if not first_mismatch_order:
+                first_mismatch_order = _join_order(result["order"])
+                first_mismatch_hash = result["hash"]
+
+    if failed:
+        status = "failed"
+    elif different_count:
+        status = "mismatch"
+    elif exhaustive:
+        status = "all_permutations_same"
+    else:
+        status = "sampled_same"
+
+    base_row.update(
+        {
+            "tested_orders": str(1 + len(validation_orders)),
+            "same_hash_count": str(same_count),
+            "different_hash_count": str(different_count),
+            "validation_status": status,
+            "first_mismatch_order": first_mismatch_order,
+            "first_mismatch_hash": first_mismatch_hash,
+            "time_ms": _elapsed_ms(start),
+        }
+    )
+    return base_row
+
+
+def _state_input_ll(state_dir: Path) -> Path | None:
+    direct = state_dir / "input.ll"
+    if direct.exists():
+        return direct
+    metadata_path = state_dir / "metadata.json"
+    if not metadata_path.exists():
+        return None
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    input_path = metadata.get("input")
+    if not input_path:
+        return None
+    resolved = Path(input_path)
+    return resolved if resolved.exists() else None
+
+
+def _validation_orders(
+    canonical_order: list[str],
+    max_permutation_factorial: int,
+    samples: int,
+) -> tuple[list[list[str]], bool]:
+    canonical_tuple = tuple(canonical_order)
+    permutation_count = math.factorial(len(canonical_order))
+    if permutation_count <= max_permutation_factorial:
+        return [
+            list(order)
+            for order in itertools.permutations(canonical_order)
+            if order != canonical_tuple
+        ], True
+
+    rng = random.Random(0)
+    seen = {canonical_tuple}
+    orders = []
+    attempts = 0
+    max_attempts = max(samples * 20, 100)
+    while len(orders) < samples and attempts < max_attempts:
+        attempts += 1
+        order = list(canonical_order)
+        rng.shuffle(order)
+        order_tuple = tuple(order)
+        if order_tuple in seen:
+            continue
+        seen.add(order_tuple)
+        orders.append(order)
+    return orders, False
+
+
+def _run_validation_orders(
+    opt: str,
+    input_ll: Path,
+    orders: list[list[str]],
+    batch_dir: Path,
+    timeout: int,
+    jobs: int,
+) -> list[dict]:
+    if not orders:
+        return []
+    if jobs <= 1:
+        return [_run_one_validation_order(opt, input_ll, order, batch_dir, index, timeout) for index, order in enumerate(orders)]
+
+    results: list[dict | None] = [None] * len(orders)
+    with ThreadPoolExecutor(max_workers=jobs) as executor:
+        futures = {
+            executor.submit(_run_one_validation_order, opt, input_ll, order, batch_dir, index, timeout): index
+            for index, order in enumerate(orders)
+        }
+        for future in as_completed(futures):
+            results[futures[future]] = future.result()
+    return [result for result in results if result is not None]
+
+
+def _run_one_validation_order(
+    opt: str,
+    input_ll: Path,
+    order: list[str],
+    batch_dir: Path,
+    index: int,
+    timeout: int,
+) -> dict:
+    output_ll = batch_dir / f"order_{index:04d}.ll"
+    output_ll.parent.mkdir(parents=True, exist_ok=True)
+    result = run_opt(opt, input_ll, order, output_ll, timeout)
+    if not result.success or not output_ll.exists():
+        return {"order": order, "success": False, "hash": ""}
+    return {"order": order, "success": True, "hash": hash_ir(output_ll)}
+
+
 def _component_edges(component: list[str], edges: set[tuple[str, str]], pass_rank: dict[str, int]) -> list[tuple[str, str]]:
     component_set = set(component)
     return sorted(
@@ -274,6 +503,22 @@ def _join_passes(passes: list[str], pass_rank: dict[str, int]) -> str:
 
 def _join_edges(edges: list[tuple[str, str]]) -> str:
     return ";".join(f"{pass_a}--{pass_b}" for pass_a, pass_b in edges)
+
+
+def _split_passes(value: str | None) -> list[str]:
+    return [part for part in str(value or "").split(";") if part]
+
+
+def _join_order(passes: list[str]) -> str:
+    return ";".join(passes)
+
+
+def _safe_name(value: str) -> str:
+    return "".join(char if char.isalnum() or char in "-_." else "_" for char in value) or "batch"
+
+
+def _elapsed_ms(start: float) -> str:
+    return f"{(time.perf_counter() - start) * 1000:.2f}"
 
 
 def _write_summary_md(
@@ -316,6 +561,25 @@ def _write_summary_md(
         [row["batch_id"], row["batch_size"], row["batch_passes"], row["is_exact"]]
         for row in candidate_rows[:20]
     ]))
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _append_validation_summary(path: Path, rows: list[dict]) -> None:
+    existing = path.read_text(encoding="utf-8") if path.exists() else "# Batch Summary\n"
+    marker = "\n## Validation\n"
+    if marker in existing:
+        existing = existing.split(marker, 1)[0].rstrip() + "\n"
+    counts = Counter(row["validation_status"] for row in rows)
+    lines = [
+        existing.rstrip(),
+        "",
+        "## Validation",
+        "",
+        "- all_permutations_same is a strong batch certificate.",
+        "- sampled_same is empirical evidence, not hard proof.",
+        "",
+    ]
+    lines.extend(_markdown_table(["validation_status", "count"], [[status, str(count)] for status, count in sorted(counts.items())]))
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 

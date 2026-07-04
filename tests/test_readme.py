@@ -10,6 +10,8 @@ class ReadmeTests(unittest.TestCase):
         self.assertIn("--state-dir", readme)
         self.assertIn("--max-component-size", readme)
         self.assertIn("--max-batch-candidates", readme)
+        self.assertIn("--validate-batches", readme)
+        self.assertIn("batch_validation.csv", readme)
         self.assertIn("does not run opt", readme)
 
 

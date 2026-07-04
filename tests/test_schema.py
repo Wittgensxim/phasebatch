@@ -5,6 +5,7 @@ from phasebatch.schema import (
     BATCH_CANDIDATE_FIELDS,
     BATCH_COMPONENT_FIELDS,
     BATCH_SUMMARY_FIELDS,
+    BATCH_VALIDATION_FIELDS,
     ENABLE_SUPPRESS_FIELDS,
     PAIR_RELATION_FIELDS,
     PASS_PROFILE_FIELDS,
@@ -181,5 +182,24 @@ class SchemaTests(unittest.TestCase):
                 "unresolved_components",
                 "naive_orderings_estimate",
                 "batch_reduction_estimate",
+            ],
+        )
+        self.assertEqual(
+            BATCH_VALIDATION_FIELDS,
+            [
+                "program",
+                "state_id",
+                "state_hash",
+                "batch_id",
+                "batch_size",
+                "canonical_order",
+                "tested_orders",
+                "same_hash_count",
+                "different_hash_count",
+                "validation_status",
+                "canonical_hash",
+                "first_mismatch_order",
+                "first_mismatch_hash",
+                "time_ms",
             ],
         )

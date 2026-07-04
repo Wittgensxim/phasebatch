@@ -105,3 +105,18 @@ class CliPipelineTests(unittest.TestCase):
         fake_build.assert_called_once_with(state_dir, max_component_size=7, max_batch_candidates=11)
         fake_collect.assert_not_called()
         self.assertEqual(result["batch_candidates"], 3)
+
+    def test_run_batchify_validates_when_requested(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / "state"
+            state_dir.mkdir()
+
+            with mock.patch("phasebatch.cli.build_batch_family", return_value={"batch_candidates": 3, "batch_summary_md": "summary.md"}) as fake_build, \
+                mock.patch("phasebatch.cli.collect_toolchain", return_value={"tools": {"opt": {"path": "opt", "version": "LLVM"}}}) as fake_collect, \
+                mock.patch("phasebatch.cli.validate_batch_candidates", return_value={"validated_batches": 3, "batch_validation_csv": "validation.csv"}) as fake_validate:
+                result = run_batchify(state_dir, max_component_size=7, max_batch_candidates=11, validate_batches=True)
+
+        fake_build.assert_called_once_with(state_dir, max_component_size=7, max_batch_candidates=11)
+        fake_collect.assert_called_once()
+        fake_validate.assert_called_once_with(state_dir, {"opt": "opt"}, timeout=10, jobs=1)
+        self.assertEqual(result["validated_batches"], 3)

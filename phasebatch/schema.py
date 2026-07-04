@@ -244,6 +244,23 @@ BATCH_SUMMARY_FIELDS = [
     "batch_reduction_estimate",
 ]
 
+BATCH_VALIDATION_FIELDS = [
+    "program",
+    "state_id",
+    "state_hash",
+    "batch_id",
+    "batch_size",
+    "canonical_order",
+    "tested_orders",
+    "same_hash_count",
+    "different_hash_count",
+    "validation_status",
+    "canonical_hash",
+    "first_mismatch_order",
+    "first_mismatch_hash",
+    "time_ms",
+]
+
 
 @dataclass
 class RunResult:
