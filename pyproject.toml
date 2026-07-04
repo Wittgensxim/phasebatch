@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "phase-order-mvp"
+version = "0.1.0"
+description = "Data-producing LLVM phase-ordering MVP."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+phasebatch = "phasebatch.cli:main"
