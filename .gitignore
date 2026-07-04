@@ -12,7 +12,8 @@ htmlcov/
 venv/
 env/
 
-outputs/
+outputs/*
+!outputs/.gitkeep
 dist/
 build/
 *.egg-info/

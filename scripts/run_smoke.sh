@@ -17,6 +17,16 @@ $PYTHON_CMD -m phasebatch --help
 $PYTHON_CMD -m phasebatch analyze --help
 $PYTHON_CMD -m phasebatch batch --help
 $PYTHON_CMD -m phasebatch analyze \
-  --input x.c \
-  --out outputs/x \
-  --passes configs/core_passes.yaml
+  --input benchmarks/tiny/branch.c \
+  --out outputs/smoke_branch \
+  --passes configs/core_passes.yaml \
+  --jobs 2 \
+  --timeout 10 \
+  --max-pairs 20
+
+OPT_CMD="${OPT_CMD:-E:/llvm/build/bin/opt.exe}"
+if [ -x "$OPT_CMD" ]; then
+  "$OPT_CMD" -S -verify-each -passes=function\(instcombine\) \
+    outputs/smoke_branch/input.ll \
+    -o outputs/smoke_branch/artifacts/instcombine_smoke.ll
+fi

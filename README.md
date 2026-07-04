@@ -1,7 +1,7 @@
 # Phase Ordering MVP Data System
 
 This repository contains a data-producing MVP for LLVM phase-ordering research.
-The first milestone is a small Python CLI that will grow into a pipeline for:
+It provides a small Python CLI that produces:
 
 - LLVM toolchain metadata capture;
 - active/dormant pass profiling;
@@ -9,16 +9,29 @@ The first milestone is a small Python CLI that will grow into a pipeline for:
 - conflict graph statistics;
 - CSV and Markdown reports.
 
-The current bootstrap provides the `phasebatch` package, CLI command skeletons,
-and a small stdlib-only config loader.
+The MVP uses coarse pass-level effects. It is designed to support progress
+meetings with concrete structural data, not to claim global phase-ordering
+optimality.
 
 ## Quick Start
 
 ```bash
 python -m phasebatch --help
-python -m phasebatch analyze --help
-python -m phasebatch batch --help
-python -m phasebatch analyze --input x.c --out outputs/x --passes configs/core_passes.yaml
+python -m phasebatch analyze \
+  --input benchmarks/tiny/branch.c \
+  --out outputs/branch \
+  --passes configs/core_passes.yaml \
+  --jobs 8 \
+  --timeout 10 \
+  --max-pairs 300
+
+python -m phasebatch batch \
+  --inputs benchmarks/tiny/*.c \
+  --out outputs/mvp_run \
+  --passes configs/core_passes.yaml \
+  --jobs 8 \
+  --timeout 10 \
+  --max-pairs 300
 ```
 
 On this machine, use the DLM Conda environment:
@@ -29,3 +42,19 @@ D:/Miniconda/envs/dlm/python.exe -m phasebatch --help
 
 `scripts/run_smoke.sh` prefers `D:/Miniconda/envs/dlm/python.exe` when present,
 then a `dlm` command if one is on PATH, then `python`.
+
+## Outputs
+
+Each `analyze` output directory contains:
+
+- `metadata.json`
+- `valid_passes.csv`
+- `invalid_passes.csv`
+- `pass_profile.csv`
+- `pair_relation.csv`
+- `cluster_distribution.csv`
+- `per_state_summary.csv`
+- `summary.md`
+- `artifacts/`
+
+The `batch` command also writes aggregate CSVs and `aggregate_summary.md`.
