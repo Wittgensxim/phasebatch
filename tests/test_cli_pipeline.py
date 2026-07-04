@@ -140,6 +140,7 @@ class CliPipelineTests(unittest.TestCase):
                     max_component_size=10,
                     max_batch_candidates=50,
                     validate_batches=True,
+                    allow_sampled_batches=True,
                 )
 
         fake_explore.assert_called_once_with(
@@ -153,5 +154,6 @@ class CliPipelineTests(unittest.TestCase):
             max_component_size=10,
             max_batch_candidates=50,
             validate_batches=True,
+            allow_sampled_batches=True,
         )
         self.assertEqual(result["batch_transitions"], 1)

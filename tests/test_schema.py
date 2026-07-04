@@ -12,6 +12,7 @@ from phasebatch.schema import (
     PASS_PROFILE_FIELDS,
     PER_STATE_SUMMARY_FIELDS,
     RELATION_FLIP_FIELDS,
+    SKIPPED_BATCH_FIELDS,
     STATE_FIELDS,
     STATE_TRANSITION_FIELDS,
 )
@@ -220,5 +221,17 @@ class SchemaTests(unittest.TestCase):
                 "is_duplicate",
                 "duplicate_of",
                 "validation_status",
+            ],
+        )
+        self.assertEqual(
+            SKIPPED_BATCH_FIELDS,
+            [
+                "program",
+                "parent_state_id",
+                "batch_id",
+                "batch_passes",
+                "batch_size",
+                "validation_status",
+                "skip_reason",
             ],
         )

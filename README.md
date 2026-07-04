@@ -51,6 +51,7 @@ python -m phasebatch explore-batches \
   --max-component-size 10 \
   --max-batch-candidates 50 \
   --validate-batches \
+  --allow-sampled-batches \
   --jobs 8 \
   --timeout 10 \
   --max-pairs 300
@@ -94,10 +95,14 @@ The `batch` command also writes aggregate CSVs and `aggregate_summary.md`.
 The `explore` command writes `states.csv`, `state_transitions.csv`, and one
 analysis directory per state under `states/`.
 The `explore-batches` command analyzes the root state, batchifies it, applies
-each batch candidate as a depth-1 transition, caches duplicate child hashes, and
-writes `batch_state_transitions.csv`, `enable_suppress.csv`,
-`relation_flip.csv`, `states.csv`, `aggregate_by_depth.csv`,
-`multistate_summary.md`, and `batch_explore_summary.md`.
+eligible batch candidates as depth-1 transitions, caches duplicate child
+hashes, and writes `batch_state_transitions.csv`, `skipped_batches.csv`,
+`enable_suppress.csv`, `relation_flip.csv`, `states.csv`,
+`aggregate_by_depth.csv`, `multistate_summary.md`, and
+`batch_explore_summary.md`. When `--validate-batches` is enabled, only
+`all_permutations_same` candidates are applied by default. Add
+`--allow-sampled-batches` to also apply `sampled_same` candidates. `mismatch`
+and `failed` candidates are never applied.
 The `batchify` command consumes an existing state directory, reads only
 `pass_profile.csv` and `pair_relation.csv`, and writes `batch_components.csv`,
 `batch_candidates.csv`, `batch_summary.csv`, and `batch_summary.md`. It does not run opt

@@ -15,6 +15,8 @@ class ReadmeTests(unittest.TestCase):
         self.assertIn("python -m phasebatch explore-batches", readme)
         self.assertIn("batch_state_transitions.csv", readme)
         self.assertIn("batch_explore_summary.md", readme)
+        self.assertIn("--allow-sampled-batches", readme)
+        self.assertIn("skipped_batches.csv", readme)
         self.assertIn("does not run opt", readme)
 
 

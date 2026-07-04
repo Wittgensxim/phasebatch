@@ -27,6 +27,7 @@ from .schema import (
     BATCH_STATE_TRANSITION_FIELDS,
     ENABLE_SUPPRESS_FIELDS,
     RELATION_FLIP_FIELDS,
+    SKIPPED_BATCH_FIELDS,
     STATE_FIELDS,
     STATE_TRANSITION_FIELDS,
 )
@@ -44,6 +45,7 @@ def explore_batches(
     max_component_size: int,
     max_batch_candidates: int,
     validate_batches: bool,
+    allow_sampled_batches: bool = False,
 ) -> dict:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -66,6 +68,7 @@ def explore_batches(
             "max_component_size": max_component_size,
             "max_batch_candidates": max_batch_candidates,
             "validate_batches": validate_batches,
+            "allow_sampled_batches": allow_sampled_batches,
             "exploration_mode": "batches",
         }
     )
@@ -110,6 +113,7 @@ def explore_batches(
     state_transition_rows: list[dict] = []
     enable_suppress_rows: list[dict] = []
     relation_flip_rows: list[dict] = []
+    skipped_batch_rows: list[dict] = []
     canonical_rows_by_id: dict[str, dict] = {}
     hash_to_state_id: dict[str, str] = {root_hash: "S0000"}
     next_state_number = 1
@@ -130,8 +134,19 @@ def explore_batches(
     canonical_rows_by_id["S0000"] = root_row
 
     if max_depth >= 1:
+        candidate_rows = _read_csv(root_dir / "batch_candidates.csv")
         validation_map = _validation_status_map(root_dir / "batch_validation.csv")
-        for candidate in _read_csv(root_dir / "batch_candidates.csv"):
+        for candidate in candidate_rows:
+            validation_status = validation_map.get(candidate.get("batch_id", ""), "not_validated")
+            skip_reason = _validation_skip_reason(
+                validation_status,
+                validate_batches=validate_batches,
+                allow_sampled_batches=allow_sampled_batches,
+            )
+            if skip_reason:
+                skipped_batch_rows.append(_skipped_batch_row(program, "S0000", candidate, validation_status, skip_reason))
+                continue
+
             order = _split_order(candidate.get("canonical_order") or candidate.get("batch_passes"))
             if not order:
                 continue
@@ -198,7 +213,6 @@ def explore_batches(
                 canonical_rows_by_id[child_id] = child_row
 
             state_rows.append(child_row)
-            validation_status = validation_map.get(candidate.get("batch_id", ""), "not_validated")
             batch_transition_rows.append(
                 _batch_transition_row(program, root_row, child_row, candidate, is_duplicate, duplicate_of, validation_status)
             )
@@ -211,6 +225,7 @@ def explore_batches(
     _write_csv(out_dir / "states.csv", STATE_FIELDS, state_rows)
     _write_csv(out_dir / "state_transitions.csv", STATE_TRANSITION_FIELDS, state_transition_rows)
     _write_csv(out_dir / "batch_state_transitions.csv", BATCH_STATE_TRANSITION_FIELDS, batch_transition_rows)
+    _write_csv(out_dir / "skipped_batches.csv", SKIPPED_BATCH_FIELDS, skipped_batch_rows)
     _write_csv(out_dir / "enable_suppress.csv", ENABLE_SUPPRESS_FIELDS, enable_suppress_rows)
     _write_csv(out_dir / "relation_flip.csv", RELATION_FLIP_FIELDS, relation_flip_rows)
     aggregate_rows = _aggregate_by_depth(out_dir, program)
@@ -221,8 +236,10 @@ def explore_batches(
         root_hash=root_hash,
         states=state_rows,
         transitions=batch_transition_rows,
+        skipped_batches=skipped_batch_rows,
         root_batch_result=root_batch_result,
         validate_batches=validate_batches,
+        allow_sampled_batches=allow_sampled_batches,
     )
     return {
         "program": program,
@@ -231,6 +248,7 @@ def explore_batches(
         "batch_transitions": len(batch_transition_rows),
         "states_csv": str(out_dir / "states.csv"),
         "batch_state_transitions_csv": str(out_dir / "batch_state_transitions.csv"),
+        "skipped_batches_csv": str(out_dir / "skipped_batches.csv"),
         "enable_suppress_csv": str(out_dir / "enable_suppress.csv"),
         "relation_flip_csv": str(out_dir / "relation_flip.csv"),
         "aggregate_by_depth_csv": str(out_dir / "aggregate_by_depth.csv"),
@@ -243,8 +261,51 @@ def _validation_status_map(path: Path) -> dict[str, str]:
     return {row.get("batch_id", ""): row.get("validation_status", "") for row in _read_csv(path) if row.get("batch_id")}
 
 
+def _validation_skip_reason(
+    validation_status: str,
+    *,
+    validate_batches: bool,
+    allow_sampled_batches: bool,
+) -> str:
+    if not validate_batches:
+        return ""
+
+    status = validation_status or "not_validated"
+    if status == "all_permutations_same":
+        return ""
+    if status == "sampled_same":
+        if allow_sampled_batches:
+            return ""
+        return "sampled_batches_not_allowed"
+    if status == "mismatch":
+        return "validation_mismatch"
+    if status == "failed":
+        return "validation_failed"
+    if status == "not_validated":
+        return "validation_missing"
+    return "validation_status_not_allowed"
+
+
 def _split_order(value: str | None) -> list[str]:
     return [part for part in str(value or "").split(";") if part]
+
+
+def _skipped_batch_row(
+    program: str,
+    parent_state_id: str,
+    candidate: dict,
+    validation_status: str,
+    skip_reason: str,
+) -> dict:
+    return {
+        "program": program,
+        "parent_state_id": parent_state_id,
+        "batch_id": candidate.get("batch_id", ""),
+        "batch_passes": candidate.get("batch_passes", ""),
+        "batch_size": candidate.get("batch_size", ""),
+        "validation_status": validation_status or "not_validated",
+        "skip_reason": skip_reason,
+    }
 
 
 def _batch_transition_row(
@@ -304,11 +365,15 @@ def _write_batch_explore_summary(
     root_hash: str,
     states: list[dict],
     transitions: list[dict],
+    skipped_batches: list[dict],
     root_batch_result: dict,
     validate_batches: bool,
+    allow_sampled_batches: bool,
 ) -> None:
     duplicate_states = sum(1 for row in states if row.get("is_duplicate") == "true")
     validation_counts = Counter(row.get("validation_status", "") for row in transitions if row.get("validation_status"))
+    skipped_counts = Counter(row.get("validation_status", "") for row in skipped_batches if row.get("validation_status"))
+    total_batch_candidates = int(root_batch_result.get("batch_candidates", 0) or 0)
     lines = [
         "# Batch Explore Summary",
         "",
@@ -318,13 +383,18 @@ def _write_batch_explore_summary(
         f"- states explored: {len(states)}",
         f"- batch transitions: {len(transitions)}",
         f"- duplicate states: {duplicate_states}",
-        f"- root batch candidates: {root_batch_result.get('batch_candidates', 0)}",
+        f"- total batch candidates: {total_batch_candidates}",
+        f"- executed batches: {len(transitions)}",
+        f"- skipped batches: {len(skipped_batches)}",
         f"- validate batches: {_bool(validate_batches)}",
+        f"- allow sampled batches: {_bool(allow_sampled_batches)}",
         "",
-        "## Validation",
+        "## Executed Validation Status",
         "",
     ]
     lines.extend(_markdown_table(["validation_status", "count"], [[key, str(count)] for key, count in sorted(validation_counts.items())]))
+    lines.extend(["", "## Skipped By Validation Status", ""])
+    lines.extend(_markdown_table(["validation_status", "count"], [[key, str(count)] for key, count in sorted(skipped_counts.items())]))
     lines.extend(["", "## Batch Transitions", ""])
     lines.extend(
         _markdown_table(

@@ -81,6 +81,7 @@ class CliBootstrapTests(unittest.TestCase):
         self.assertIn("--max-component-size", result.stdout)
         self.assertIn("--max-batch-candidates", result.stdout)
         self.assertIn("--validate-batches", result.stdout)
+        self.assertIn("--allow-sampled-batches", result.stdout)
 
 
 if __name__ == "__main__":

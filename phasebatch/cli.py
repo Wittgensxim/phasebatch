@@ -55,6 +55,11 @@ def build_parser() -> argparse.ArgumentParser:
     explore_batches_parser.add_argument("--max-component-size", type=int, default=10, help="Maximum exact conflict component size.")
     explore_batches_parser.add_argument("--max-batch-candidates", type=int, default=50, help="Maximum batch candidates per state.")
     explore_batches_parser.add_argument("--validate-batches", action="store_true", help="Validate root batch candidates before applying them.")
+    explore_batches_parser.add_argument(
+        "--allow-sampled-batches",
+        action="store_true",
+        help="When validating, also apply sampled_same batch candidates.",
+    )
     explore_batches_parser.set_defaults(func=_run_explore_batches)
 
     batchify = subparsers.add_parser("batchify", help="Build batch candidates for one analyzed state.")
@@ -143,6 +148,7 @@ def _run_explore_batches(args: argparse.Namespace) -> int:
         max_component_size=args.max_component_size,
         max_batch_candidates=args.max_batch_candidates,
         validate_batches=args.validate_batches,
+        allow_sampled_batches=args.allow_sampled_batches,
     )
     print(
         "batch-explored {program}: states={states} batch_transitions={batch_transitions} "
@@ -197,6 +203,7 @@ def run_explore_batches(
     max_component_size: int,
     max_batch_candidates: int,
     validate_batches: bool,
+    allow_sampled_batches: bool = False,
 ) -> dict:
     return explore_batches(
         input_path,
@@ -209,6 +216,7 @@ def run_explore_batches(
         max_component_size=max_component_size,
         max_batch_candidates=max_batch_candidates,
         validate_batches=validate_batches,
+        allow_sampled_batches=allow_sampled_batches,
     )
 
 
@@ -224,6 +232,7 @@ def explore_batches(
     max_component_size: int,
     max_batch_candidates: int,
     validate_batches: bool,
+    allow_sampled_batches: bool = False,
 ) -> dict:
     from .batch_explorer import explore_batches as explore_batches_impl
 
@@ -238,6 +247,7 @@ def explore_batches(
         max_component_size=max_component_size,
         max_batch_candidates=max_batch_candidates,
         validate_batches=validate_batches,
+        allow_sampled_batches=allow_sampled_batches,
     )
 
 

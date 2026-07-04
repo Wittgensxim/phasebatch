@@ -277,6 +277,16 @@ BATCH_STATE_TRANSITION_FIELDS = [
     "validation_status",
 ]
 
+SKIPPED_BATCH_FIELDS = [
+    "program",
+    "parent_state_id",
+    "batch_id",
+    "batch_passes",
+    "batch_size",
+    "validation_status",
+    "skip_reason",
+]
+
 
 @dataclass
 class RunResult:
