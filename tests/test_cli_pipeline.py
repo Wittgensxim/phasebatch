@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from phasebatch.cli import analyze_state, run_analysis, run_batch
+from phasebatch.cli import analyze_state, run_analysis, run_batch, run_batchify
 
 
 class CliPipelineTests(unittest.TestCase):
@@ -92,3 +92,16 @@ class CliPipelineTests(unittest.TestCase):
 
         self.assertEqual(len(result["program_dirs"]), 2)
         self.assertEqual(fake_run.call_count, 2)
+
+    def test_run_batchify_calls_batcher_without_toolchain(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / "state"
+            state_dir.mkdir()
+
+            with mock.patch("phasebatch.cli.build_batch_family", return_value={"batch_candidates": 3, "batch_summary_md": "summary.md"}) as fake_build, \
+                mock.patch("phasebatch.cli.collect_toolchain") as fake_collect:
+                result = run_batchify(state_dir, max_component_size=7, max_batch_candidates=11)
+
+        fake_build.assert_called_once_with(state_dir, max_component_size=7, max_batch_candidates=11)
+        fake_collect.assert_not_called()
+        self.assertEqual(result["batch_candidates"], 3)

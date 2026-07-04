@@ -42,6 +42,11 @@ python -m phasebatch explore \
   --jobs 8 \
   --timeout 10 \
   --max-pairs 300
+
+python -m phasebatch batchify \
+  --state-dir outputs/explore_branch/states/S0000 \
+  --max-component-size 10 \
+  --max-batch-candidates 200
 ```
 
 On this machine, use the DLM Conda environment:
@@ -70,3 +75,6 @@ Each `analyze` output directory contains:
 The `batch` command also writes aggregate CSVs and `aggregate_summary.md`.
 The `explore` command writes `states.csv`, `state_transitions.csv`, and one
 analysis directory per state under `states/`.
+The `batchify` command consumes an existing state directory, reads only
+`pass_profile.csv` and `pair_relation.csv`, and writes `batch_components.csv`,
+`batch_candidates.csv`, `batch_summary.csv`, and `batch_summary.md`. It does not run opt.

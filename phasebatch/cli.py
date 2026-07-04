@@ -6,6 +6,7 @@ import json
 import time
 from pathlib import Path
 
+from .batcher import build_batch_family
 from .config import load_passes
 from .graph import cluster_distribution_rows, write_cluster_distribution
 from .normalizer import canonical_hash
@@ -46,6 +47,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     explore.add_argument("--top-k", type=int, default=5, help="Frontier cap for top-k policies.")
     explore.set_defaults(func=_run_explore)
+
+    batchify = subparsers.add_parser("batchify", help="Build batch candidates for one analyzed state.")
+    batchify.add_argument("--state-dir", required=True, help="State directory containing pass_profile.csv and pair_relation.csv.")
+    batchify.add_argument("--max-component-size", type=int, default=10, help="Maximum exact conflict component size.")
+    batchify.add_argument("--max-batch-candidates", type=int, default=200, help="Maximum global batch candidates to emit.")
+    batchify.set_defaults(func=_run_batchify)
 
     return parser
 
@@ -112,6 +119,31 @@ def _run_explore(args: argparse.Namespace) -> int:
         "states_csv={states_csv}".format(**result)
     )
     return 0
+
+
+def _run_batchify(args: argparse.Namespace) -> int:
+    result = run_batchify(
+        Path(args.state_dir),
+        max_component_size=args.max_component_size,
+        max_batch_candidates=args.max_batch_candidates,
+    )
+    print(
+        "batchified {state_id}: candidates={batch_candidates} "
+        "summary={batch_summary_md}".format(**result)
+    )
+    return 0
+
+
+def run_batchify(
+    state_dir: Path,
+    max_component_size: int = 10,
+    max_batch_candidates: int = 200,
+) -> dict:
+    return build_batch_family(
+        Path(state_dir),
+        max_component_size=max_component_size,
+        max_batch_candidates=max_batch_candidates,
+    )
 
 
 def run_analysis(

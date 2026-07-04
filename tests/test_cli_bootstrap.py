@@ -18,6 +18,7 @@ class CliBootstrapTests(unittest.TestCase):
         self.assertIn("analyze", result.stdout)
         self.assertIn("batch", result.stdout)
         self.assertIn("explore", result.stdout)
+        self.assertIn("batchify", result.stdout)
 
     def test_analyze_help_runs(self) -> None:
         repo = Path(__file__).resolve().parents[1]
@@ -46,6 +47,21 @@ class CliBootstrapTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--max-depth", result.stdout)
         self.assertIn("--frontier-policy", result.stdout)
+
+    def test_batchify_help_runs(self) -> None:
+        repo = Path(__file__).resolve().parents[1]
+        result = subprocess.run(
+            [sys.executable, "-m", "phasebatch", "batchify", "--help"],
+            cwd=repo,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--state-dir", result.stdout)
+        self.assertIn("--max-component-size", result.stdout)
+        self.assertIn("--max-batch-candidates", result.stdout)
 
 
 if __name__ == "__main__":
