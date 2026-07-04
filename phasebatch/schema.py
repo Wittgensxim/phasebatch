@@ -199,6 +199,51 @@ AGGREGATE_BY_DEPTH_FIELDS = [
     "total_time_ms",
 ]
 
+BATCH_COMPONENT_FIELDS = [
+    "program",
+    "state_id",
+    "state_hash",
+    "component_id",
+    "component_size",
+    "component_passes",
+    "conflict_edges",
+    "commute_edges",
+    "is_exact",
+    "num_local_alternatives",
+    "unresolved_reason",
+]
+
+BATCH_CANDIDATE_FIELDS = [
+    "program",
+    "state_id",
+    "state_hash",
+    "batch_id",
+    "batch_passes",
+    "batch_size",
+    "component_choices",
+    "is_exact",
+    "num_conflict_components",
+    "unresolved_components",
+    "canonical_order",
+]
+
+BATCH_SUMMARY_FIELDS = [
+    "program",
+    "state_id",
+    "state_hash",
+    "active_passes",
+    "active_pairs",
+    "commute_pairs",
+    "conflict_pairs",
+    "conflict_components",
+    "max_component_size",
+    "batch_candidates",
+    "exact_components",
+    "unresolved_components",
+    "naive_orderings_estimate",
+    "batch_reduction_estimate",
+]
+
 
 @dataclass
 class RunResult:

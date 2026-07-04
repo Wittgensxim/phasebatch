@@ -2,6 +2,9 @@ import unittest
 
 from phasebatch.schema import (
     AGGREGATE_BY_DEPTH_FIELDS,
+    BATCH_CANDIDATE_FIELDS,
+    BATCH_COMPONENT_FIELDS,
+    BATCH_SUMMARY_FIELDS,
     ENABLE_SUPPRESS_FIELDS,
     PAIR_RELATION_FIELDS,
     PASS_PROFILE_FIELDS,
@@ -125,5 +128,58 @@ class SchemaTests(unittest.TestCase):
                 "missing_to_active_pair",
                 "active_pair_to_missing",
                 "total_time_ms",
+            ],
+        )
+
+    def test_batch_construction_schemas_are_present(self) -> None:
+        self.assertEqual(
+            BATCH_COMPONENT_FIELDS,
+            [
+                "program",
+                "state_id",
+                "state_hash",
+                "component_id",
+                "component_size",
+                "component_passes",
+                "conflict_edges",
+                "commute_edges",
+                "is_exact",
+                "num_local_alternatives",
+                "unresolved_reason",
+            ],
+        )
+        self.assertEqual(
+            BATCH_CANDIDATE_FIELDS,
+            [
+                "program",
+                "state_id",
+                "state_hash",
+                "batch_id",
+                "batch_passes",
+                "batch_size",
+                "component_choices",
+                "is_exact",
+                "num_conflict_components",
+                "unresolved_components",
+                "canonical_order",
+            ],
+        )
+        self.assertEqual(
+            BATCH_SUMMARY_FIELDS,
+            [
+                "program",
+                "state_id",
+                "state_hash",
+                "active_passes",
+                "active_pairs",
+                "commute_pairs",
+                "conflict_pairs",
+                "conflict_components",
+                "max_component_size",
+                "batch_candidates",
+                "exact_components",
+                "unresolved_components",
+                "naive_orderings_estimate",
+                "batch_reduction_estimate",
             ],
         )
