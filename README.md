@@ -94,9 +94,9 @@ Each `analyze` output directory contains:
 The `batch` command also writes aggregate CSVs and `aggregate_summary.md`.
 The `explore` command writes `states.csv`, `state_transitions.csv`, and one
 analysis directory per state under `states/`.
-The `explore-batches` command analyzes the root state, batchifies it, applies
-eligible batch candidates as depth-1 transitions, caches duplicate child
-hashes, and writes `batch_state_transitions.csv`, `skipped_batches.csv`,
+The `explore-batches` command analyzes the root state, repeatedly batchifies
+frontier states up to `--max-depth`, applies eligible batch candidates, caches
+duplicate child hashes, and writes `batch_state_transitions.csv`, `skipped_batches.csv`,
 `enable_suppress.csv`, `relation_flip.csv`, `states.csv`,
 `aggregate_by_depth.csv`, `multistate_summary.md`, and
 `batch_explore_summary.md`. When `--validate-batches` is enabled, only

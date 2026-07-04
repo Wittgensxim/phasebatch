@@ -123,6 +123,36 @@ class BatchExplorerTests(unittest.TestCase):
         self.assertIn("executed batches: 2", summary)
         self.assertIn("skipped batches: 0", summary)
 
+    def test_depth_two_batch_explore_expands_non_duplicate_frontier_states(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result, out_dir, fake_analyze = _run_fake_batch_explore(
+                Path(tmp),
+                validate_batches=False,
+                max_depth=2,
+                unique_outputs=True,
+            )
+
+            states = _read_csv(out_dir / "states.csv")
+            transitions = _read_csv(out_dir / "batch_state_transitions.csv")
+            aggregate = _read_csv(out_dir / "aggregate_by_depth.csv")
+            summary = (out_dir / "batch_explore_summary.md").read_text(encoding="utf-8")
+            child_input_exists = (out_dir / "states" / "S0001" / "input.ll").exists()
+            depth_two_batches_exist = (out_dir / "states" / "S0003" / "batch_candidates.csv").exists()
+
+        self.assertEqual(result["states"], 5)
+        self.assertEqual(result["batch_transitions"], 4)
+        self.assertEqual(fake_analyze.call_count, 5)
+        self.assertEqual([row["depth"] for row in states], ["0", "1", "1", "2", "2"])
+        self.assertEqual([row["parent_state_id"] for row in transitions], ["S0000", "S0000", "S0001", "S0002"])
+        self.assertEqual({row["is_duplicate"] for row in states}, {"false"})
+        self.assertTrue(child_input_exists)
+        self.assertTrue(depth_two_batches_exist)
+        self.assertEqual(aggregate[2]["depth"], "2")
+        self.assertEqual(aggregate[2]["num_states"], "2")
+        self.assertIn("states explored: 5", summary)
+        self.assertIn("batch transitions: 4", summary)
+        self.assertIn("total batch candidates: 4", summary)
+
 
 def _run_fake_batch_explore(
     root: Path,
@@ -130,6 +160,8 @@ def _run_fake_batch_explore(
     validate_batches: bool,
     allow_sampled_batches: bool = False,
     validation_statuses: dict[str, str] | None = None,
+    max_depth: int = 1,
+    unique_outputs: bool = False,
 ):
     input_path = root / "input.ll"
     input_path.write_text("define i32 @f() {\n  ret i32 0\n}\n", encoding="utf-8")
@@ -301,8 +333,15 @@ def _run_fake_batch_explore(
         _write_summary(state_dir, state_id, "child-hash", "1", "1", "1", "1", "7")
         return {"program": "batch_explore", "state_id": state_id, "summary_path": str(state_dir / "summary.md")}
 
+    output_counter = {"value": 0}
+
     def fake_run_opt(opt, src, passes, out, timeout):
-        out.write_text("define i32 @f() {\n  ret i32 1\n}\n", encoding="utf-8")
+        if unique_outputs:
+            output_counter["value"] += 1
+            text = f"define i32 @f() {{\n  ret i32 {output_counter['value']}\n}}\n"
+        else:
+            text = "define i32 @f() {\n  ret i32 1\n}\n"
+        out.write_text(text, encoding="utf-8")
         return RunResult([opt], 0, "", "", 1.0)
 
     def fake_validate_batch_candidates(state_dir, tools, timeout, jobs):
@@ -356,7 +395,7 @@ def _run_fake_batch_explore(
             jobs=1,
             timeout=1,
             max_pairs=5,
-            max_depth=1,
+            max_depth=max_depth,
             max_component_size=10,
             max_batch_candidates=50,
             validate_batches=validate_batches,

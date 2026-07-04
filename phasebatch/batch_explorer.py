@@ -100,14 +100,6 @@ def explore_batches(
         parent_state_id="",
         transition_pass="",
     )
-    root_batch_result = build_batch_family(
-        root_dir,
-        max_component_size=max_component_size,
-        max_batch_candidates=max_batch_candidates,
-    )
-    if validate_batches:
-        validate_batch_candidates(root_dir, tools, timeout=timeout, jobs=jobs)
-
     state_rows: list[dict] = []
     batch_transition_rows: list[dict] = []
     state_transition_rows: list[dict] = []
@@ -117,6 +109,8 @@ def explore_batches(
     canonical_rows_by_id: dict[str, dict] = {}
     hash_to_state_id: dict[str, str] = {root_hash: "S0000"}
     next_state_number = 1
+    total_batch_candidates = 0
+    root_batch_result: dict = {}
 
     root_row = _state_row_from_summary(
         root_dir,
@@ -133,53 +127,36 @@ def explore_batches(
     state_rows.append(root_row)
     canonical_rows_by_id["S0000"] = root_row
 
-    if max_depth >= 1:
-        candidate_rows = _read_csv(root_dir / "batch_candidates.csv")
-        validation_map = _validation_status_map(root_dir / "batch_validation.csv")
-        for candidate in candidate_rows:
-            validation_status = validation_map.get(candidate.get("batch_id", ""), "not_validated")
-            skip_reason = _validation_skip_reason(
-                validation_status,
-                validate_batches=validate_batches,
-                allow_sampled_batches=allow_sampled_batches,
+    frontier = [root_row]
+    for depth in range(1, max_depth + 1):
+        next_frontier: list[dict] = []
+        for parent in frontier:
+            parent_dir = Path(parent["state_dir"])
+            parent_batch_result = build_batch_family(
+                parent_dir,
+                max_component_size=max_component_size,
+                max_batch_candidates=max_batch_candidates,
             )
-            if skip_reason:
-                skipped_batch_rows.append(_skipped_batch_row(program, "S0000", candidate, validation_status, skip_reason))
+            if parent["state_id"] == "S0000":
+                root_batch_result = parent_batch_result
+            if validate_batches:
+                validate_batch_candidates(parent_dir, tools, timeout=timeout, jobs=jobs)
+
+            candidate_rows = _read_csv(parent_dir / "batch_candidates.csv")
+            total_batch_candidates += len(candidate_rows)
+            validation_map = _validation_status_map(parent_dir / "batch_validation.csv")
+            parent_input = _state_input_path(parent)
+            if not parent_input.exists():
                 continue
 
-            order = _split_order(candidate.get("canonical_order") or candidate.get("batch_passes"))
-            if not order:
-                continue
-
-            child_ir = root_dir / "artifacts" / "batch_successors" / f"{candidate.get('batch_id', 'batch')}.ll"
-            child_ir.parent.mkdir(parents=True, exist_ok=True)
-            result = run_opt(tools["opt"], root_ir, order, child_ir, timeout)
-            if not result.success or not child_ir.exists():
-                continue
-
-            child_hash = canonical_hash(child_ir)
-            child_id = f"S{next_state_number:04d}"
-            next_state_number += 1
-            duplicate_of = hash_to_state_id.get(child_hash, "")
-            is_duplicate = bool(duplicate_of)
-            batch_passes = ";".join(order)
-
-            if is_duplicate:
-                child_row = _duplicate_state_row(
-                    canonical_rows_by_id[duplicate_of],
-                    state_id=child_id,
-                    depth=1,
-                    parent_state_id="S0000",
-                    transition_pass=batch_passes,
-                    ir_path=str(child_ir),
-                    duplicate_of=duplicate_of,
-                )
-            else:
-                child_dir = states_dir / child_id
-                analyze_state(
-                    child_ir,
-                    child_dir,
-                    tools,
+            for candidate in candidate_rows:
+                result = _apply_batch_candidate(
+                    candidate,
+                    parent=parent,
+                    parent_input=parent_input,
+                    parent_dir=parent_dir,
+                    states_dir=states_dir,
+                    tools=tools,
                     valid_passes=valid_passes,
                     invalid_rows=invalid_rows,
                     configured_pass_count=len(configured_passes),
@@ -187,40 +164,37 @@ def explore_batches(
                     timeout=timeout,
                     max_pairs=max_pairs,
                     program=program,
-                    state_id=child_id,
-                    depth=1,
-                    parent_state_id="S0000",
-                    transition_pass=batch_passes,
-                )
-                build_batch_family(
-                    child_dir,
+                    depth=depth,
+                    validate_batches=validate_batches,
+                    allow_sampled_batches=allow_sampled_batches,
+                    validation_map=validation_map,
+                    hash_to_state_id=hash_to_state_id,
+                    canonical_rows_by_id=canonical_rows_by_id,
+                    state_rows=state_rows,
+                    batch_transition_rows=batch_transition_rows,
+                    state_transition_rows=state_transition_rows,
+                    enable_suppress_rows=enable_suppress_rows,
+                    relation_flip_rows=relation_flip_rows,
+                    skipped_batch_rows=skipped_batch_rows,
+                    next_state_number=next_state_number,
                     max_component_size=max_component_size,
                     max_batch_candidates=max_batch_candidates,
                 )
-                child_row = _state_row_from_summary(
-                    child_dir,
-                    program=program,
-                    state_id=child_id,
-                    state_hash=child_hash,
-                    depth=1,
-                    parent_state_id="S0000",
-                    transition_pass=batch_passes,
-                    ir_path=child_ir,
-                    is_duplicate=False,
-                    duplicate_of="",
-                )
-                hash_to_state_id[child_hash] = child_id
-                canonical_rows_by_id[child_id] = child_row
+                next_state_number = result["next_state_number"]
+                if result["frontier_row"]:
+                    next_frontier.append(result["frontier_row"])
 
-            state_rows.append(child_row)
-            batch_transition_rows.append(
-                _batch_transition_row(program, root_row, child_row, candidate, is_duplicate, duplicate_of, validation_status)
-            )
-            state_transition_rows.append(
-                _state_transition_row(program, root_row, child_row, batch_passes, str(child_ir), is_duplicate, duplicate_of)
-            )
-            enable_suppress_rows.extend(_enable_suppress_rows(program, root_row, child_row, batch_passes, valid_passes))
-            relation_flip_rows.extend(_relation_flip_rows(program, root_row, child_row, batch_passes))
+        frontier = _select_next_frontier(next_frontier)
+
+    if not root_batch_result:
+        root_batch_result = build_batch_family(
+            root_dir,
+            max_component_size=max_component_size,
+            max_batch_candidates=max_batch_candidates,
+        )
+        if validate_batches:
+            validate_batch_candidates(root_dir, tools, timeout=timeout, jobs=jobs)
+        total_batch_candidates = int(root_batch_result.get("batch_candidates", 0) or 0)
 
     _write_csv(out_dir / "states.csv", STATE_FIELDS, state_rows)
     _write_csv(out_dir / "state_transitions.csv", STATE_TRANSITION_FIELDS, state_transition_rows)
@@ -237,7 +211,7 @@ def explore_batches(
         states=state_rows,
         transitions=batch_transition_rows,
         skipped_batches=skipped_batch_rows,
-        root_batch_result=root_batch_result,
+        total_batch_candidates=total_batch_candidates,
         validate_batches=validate_batches,
         allow_sampled_batches=allow_sampled_batches,
     )
@@ -255,6 +229,148 @@ def explore_batches(
         "multistate_summary": str(out_dir / "multistate_summary.md"),
         "batch_explore_summary": str(out_dir / "batch_explore_summary.md"),
     }
+
+
+def _apply_batch_candidate(
+    candidate: dict,
+    *,
+    parent: dict,
+    parent_input: Path,
+    parent_dir: Path,
+    states_dir: Path,
+    tools: dict,
+    valid_passes: list[str],
+    invalid_rows: list[dict],
+    configured_pass_count: int,
+    jobs: int,
+    timeout: int,
+    max_pairs: int | None,
+    program: str,
+    depth: int,
+    validate_batches: bool,
+    allow_sampled_batches: bool,
+    validation_map: dict[str, str],
+    hash_to_state_id: dict[str, str],
+    canonical_rows_by_id: dict[str, dict],
+    state_rows: list[dict],
+    batch_transition_rows: list[dict],
+    state_transition_rows: list[dict],
+    enable_suppress_rows: list[dict],
+    relation_flip_rows: list[dict],
+    skipped_batch_rows: list[dict],
+    next_state_number: int,
+    max_component_size: int,
+    max_batch_candidates: int,
+) -> dict:
+    validation_status = validation_map.get(candidate.get("batch_id", ""), "not_validated")
+    skip_reason = _validation_skip_reason(
+        validation_status,
+        validate_batches=validate_batches,
+        allow_sampled_batches=allow_sampled_batches,
+    )
+    if skip_reason:
+        skipped_batch_rows.append(
+            _skipped_batch_row(program, parent["state_id"], candidate, validation_status, skip_reason)
+        )
+        return {"next_state_number": next_state_number, "frontier_row": None}
+
+    order = _split_order(candidate.get("canonical_order") or candidate.get("batch_passes"))
+    if not order:
+        return {"next_state_number": next_state_number, "frontier_row": None}
+
+    child_ir = parent_dir / "artifacts" / "batch_successors" / f"{candidate.get('batch_id', 'batch')}.ll"
+    child_ir.parent.mkdir(parents=True, exist_ok=True)
+    result = run_opt(tools["opt"], parent_input, order, child_ir, timeout)
+    if not result.success or not child_ir.exists():
+        return {"next_state_number": next_state_number, "frontier_row": None}
+
+    child_hash = canonical_hash(child_ir)
+    child_id = f"S{next_state_number:04d}"
+    next_state_number += 1
+    duplicate_of = hash_to_state_id.get(child_hash, "")
+    is_duplicate = bool(duplicate_of)
+    batch_passes = ";".join(order)
+
+    if is_duplicate:
+        child_row = _duplicate_state_row(
+            canonical_rows_by_id[duplicate_of],
+            state_id=child_id,
+            depth=depth,
+            parent_state_id=parent["state_id"],
+            transition_pass=batch_passes,
+            ir_path=str(child_ir),
+            duplicate_of=duplicate_of,
+        )
+        frontier_row = None
+    else:
+        child_dir = states_dir / child_id
+        child_input = _materialize_state_input(child_dir, child_ir)
+        analyze_state(
+            child_input,
+            child_dir,
+            tools,
+            valid_passes=valid_passes,
+            invalid_rows=invalid_rows,
+            configured_pass_count=configured_pass_count,
+            jobs=jobs,
+            timeout=timeout,
+            max_pairs=max_pairs,
+            program=program,
+            state_id=child_id,
+            depth=depth,
+            parent_state_id=parent["state_id"],
+            transition_pass=batch_passes,
+        )
+        build_batch_family(
+            child_dir,
+            max_component_size=max_component_size,
+            max_batch_candidates=max_batch_candidates,
+        )
+        child_row = _state_row_from_summary(
+            child_dir,
+            program=program,
+            state_id=child_id,
+            state_hash=child_hash,
+            depth=depth,
+            parent_state_id=parent["state_id"],
+            transition_pass=batch_passes,
+            ir_path=child_input,
+            is_duplicate=False,
+            duplicate_of="",
+        )
+        hash_to_state_id[child_hash] = child_id
+        canonical_rows_by_id[child_id] = child_row
+        frontier_row = child_row
+
+    state_rows.append(child_row)
+    batch_transition_rows.append(
+        _batch_transition_row(program, parent, child_row, candidate, is_duplicate, duplicate_of, validation_status)
+    )
+    state_transition_rows.append(
+        _state_transition_row(program, parent, child_row, batch_passes, str(child_ir), is_duplicate, duplicate_of)
+    )
+    enable_suppress_rows.extend(_enable_suppress_rows(program, parent, child_row, batch_passes, valid_passes))
+    relation_flip_rows.extend(_relation_flip_rows(program, parent, child_row, batch_passes))
+    return {"next_state_number": next_state_number, "frontier_row": frontier_row}
+
+
+def _state_input_path(state: dict) -> Path:
+    direct = Path(state["state_dir"]) / "input.ll"
+    if direct.exists():
+        return direct
+    return Path(state.get("ir_path", ""))
+
+
+def _materialize_state_input(state_dir: Path, source_ir: Path) -> Path:
+    state_dir.mkdir(parents=True, exist_ok=True)
+    input_ll = state_dir / "input.ll"
+    if source_ir.resolve() != input_ll.resolve():
+        shutil.copyfile(source_ir, input_ll)
+    return input_ll
+
+
+def _select_next_frontier(rows: list[dict]) -> list[dict]:
+    return rows
 
 
 def _validation_status_map(path: Path) -> dict[str, str]:
@@ -366,14 +482,13 @@ def _write_batch_explore_summary(
     states: list[dict],
     transitions: list[dict],
     skipped_batches: list[dict],
-    root_batch_result: dict,
+    total_batch_candidates: int,
     validate_batches: bool,
     allow_sampled_batches: bool,
 ) -> None:
     duplicate_states = sum(1 for row in states if row.get("is_duplicate") == "true")
     validation_counts = Counter(row.get("validation_status", "") for row in transitions if row.get("validation_status"))
     skipped_counts = Counter(row.get("validation_status", "") for row in skipped_batches if row.get("validation_status"))
-    total_batch_candidates = int(root_batch_result.get("batch_candidates", 0) or 0)
     lines = [
         "# Batch Explore Summary",
         "",
