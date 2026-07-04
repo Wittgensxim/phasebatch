@@ -4,10 +4,68 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from phasebatch.explorer import explore_states
+from phasebatch.explorer import _classify_enable_suppress, _classify_relation_flip, explore_states
 
 
 class ExplorerTests(unittest.TestCase):
+    def test_relation_flip_classifier_covers_requested_kinds(self) -> None:
+        self.assertEqual(
+            _classify_relation_flip("", "final_commute", parent_present=False, child_present=True),
+            "missing_to_active_pair",
+        )
+        self.assertEqual(
+            _classify_relation_flip("final_commute", "", parent_present=True, child_present=False),
+            "active_pair_to_missing",
+        )
+        self.assertEqual(
+            _classify_relation_flip("final_commute", "final_commute", parent_present=True, child_present=True),
+            "same",
+        )
+        self.assertEqual(
+            _classify_relation_flip(
+                "final_commute",
+                "final_order_sensitive",
+                parent_present=True,
+                child_present=True,
+            ),
+            "commute_to_sensitive",
+        )
+        self.assertEqual(
+            _classify_relation_flip(
+                "final_order_sensitive",
+                "final_commute",
+                parent_present=True,
+                child_present=True,
+            ),
+            "sensitive_to_commute",
+        )
+        self.assertEqual(
+            _classify_relation_flip("final_commute", "final_unknown", parent_present=True, child_present=True),
+            "known_to_unknown",
+        )
+        self.assertEqual(
+            _classify_relation_flip("final_unknown", "final_commute", parent_present=True, child_present=True),
+            "unknown_to_known",
+        )
+        self.assertEqual(
+            _classify_relation_flip("static_disjoint_function", "final_commute", parent_present=True, child_present=True),
+            "other_flip",
+        )
+
+    def test_enable_suppress_classifier_covers_requested_kinds(self) -> None:
+        dormant = {"success": "true", "active": "false", "inst_delta": "0", "blocks_changed": "0", "changed_functions": ""}
+        active = {"success": "true", "active": "true", "inst_delta": "-1", "blocks_changed": "1", "changed_functions": "f"}
+        similar_active = dict(active)
+        changed_active = dict(active, inst_delta="-2")
+        failed = {"success": "false", "active": "false"}
+
+        self.assertEqual(_classify_enable_suppress(dormant, active), "enable")
+        self.assertEqual(_classify_enable_suppress(active, dormant), "suppress")
+        self.assertEqual(_classify_enable_suppress(active, changed_active), "effect_changed")
+        self.assertEqual(_classify_enable_suppress(active, similar_active), "still_active_similar")
+        self.assertEqual(_classify_enable_suppress(dormant, dormant), "still_dormant")
+        self.assertEqual(_classify_enable_suppress(active, failed), "failed_or_unknown")
+
     def test_depth_one_explore_caches_duplicate_child_hashes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -64,6 +122,8 @@ class ExplorerTests(unittest.TestCase):
                             "inst_before",
                             "inst_after",
                             "inst_delta",
+                            "blocks_changed",
+                            "changed_functions",
                         ],
                         [
                             {
@@ -81,6 +141,8 @@ class ExplorerTests(unittest.TestCase):
                                 "inst_before": "10",
                                 "inst_after": "8",
                                 "inst_delta": "-2",
+                                "blocks_changed": "1",
+                                "changed_functions": "f",
                             },
                             {
                                 "program": "explore",
@@ -97,7 +159,22 @@ class ExplorerTests(unittest.TestCase):
                                 "inst_before": "10",
                                 "inst_after": "8",
                                 "inst_delta": "-2",
+                                "blocks_changed": "1",
+                                "changed_functions": "f",
                             },
+                        ],
+                    )
+                    _write_csv(
+                        state_dir / "pair_relation.csv",
+                        ["program", "state_id", "pass_a", "pass_b", "final_relation"],
+                        [
+                            {
+                                "program": "explore",
+                                "state_id": "S0000",
+                                "pass_a": "pass-a",
+                                "pass_b": "pass-b",
+                                "final_relation": "final_commute",
+                            }
                         ],
                     )
                     _write_csv(
@@ -109,8 +186,69 @@ class ExplorerTests(unittest.TestCase):
 
                 _write_csv(
                     state_dir / "pass_profile.csv",
-                    ["program", "state_id", "depth", "parent_state_id", "transition_pass", "state_hash", "pass", "success", "active", "output_hash", "output_path"],
-                    [],
+                    [
+                        "program",
+                        "state_id",
+                        "depth",
+                        "parent_state_id",
+                        "transition_pass",
+                        "state_hash",
+                        "pass",
+                        "success",
+                        "active",
+                        "output_hash",
+                        "output_path",
+                        "inst_delta",
+                        "blocks_changed",
+                        "changed_functions",
+                    ],
+                    [
+                        {
+                            "program": "explore",
+                            "state_id": state_id,
+                            "depth": str(depth),
+                            "parent_state_id": parent_state_id,
+                            "transition_pass": transition_pass,
+                            "state_hash": "child-hash",
+                            "pass": "pass-a",
+                            "success": "true",
+                            "active": "false",
+                            "output_hash": "child-hash",
+                            "output_path": "",
+                            "inst_delta": "0",
+                            "blocks_changed": "0",
+                            "changed_functions": "",
+                        },
+                        {
+                            "program": "explore",
+                            "state_id": state_id,
+                            "depth": str(depth),
+                            "parent_state_id": parent_state_id,
+                            "transition_pass": transition_pass,
+                            "state_hash": "child-hash",
+                            "pass": "pass-b",
+                            "success": "true",
+                            "active": "true",
+                            "output_hash": "grandchild-hash",
+                            "output_path": str(state_dir / "grandchild.ll"),
+                            "inst_delta": "-4",
+                            "blocks_changed": "2",
+                            "changed_functions": "f,g",
+                        },
+                    ],
+                )
+                _write_csv(
+                    state_dir / "pair_relation.csv",
+                    ["program", "state_id", "pass_a", "pass_b", "final_relation"],
+                    [
+                        {
+                            "program": "explore",
+                            "state_id": state_id,
+                            "pass_a": "pass-b",
+                            "pass_b": "pass-a",
+                            "final_relation": "final_order_sensitive",
+                        }
+                    ],
                 )
                 _write_csv(
                     state_dir / "per_state_summary.csv",
@@ -137,6 +275,9 @@ class ExplorerTests(unittest.TestCase):
 
             states = _read_csv(out_dir / "states.csv")
             transitions = _read_csv(out_dir / "state_transitions.csv")
+            relation_flips = _read_csv(out_dir / "relation_flip.csv")
+            enable_suppress = _read_csv(out_dir / "enable_suppress.csv")
+            multistate_summary = (out_dir / "multistate_summary.md").read_text(encoding="utf-8")
 
         self.assertEqual(result["states"], 3)
         self.assertEqual(fake_analyze.call_count, 2)
@@ -145,6 +286,18 @@ class ExplorerTests(unittest.TestCase):
         self.assertEqual(states[2]["duplicate_of"], "S0001")
         self.assertEqual(transitions[1]["is_duplicate"], "true")
         self.assertEqual(transitions[1]["duplicate_of"], "S0001")
+        self.assertEqual(len(relation_flips), 2)
+        self.assertEqual(relation_flips[0]["pass_a"], "pass-a")
+        self.assertEqual(relation_flips[0]["pass_b"], "pass-b")
+        self.assertEqual(relation_flips[0]["flip_kind"], "commute_to_sensitive")
+        self.assertEqual(len(enable_suppress), 4)
+        self.assertIn("suppress", {row["relation"] for row in enable_suppress})
+        self.assertIn("effect_changed", {row["relation"] for row in enable_suppress})
+        self.assertIn("Top relation flips", multistate_summary)
+        self.assertIn("Enable/suppress counts", multistate_summary)
+        self.assertEqual(result["relation_flip_csv"], str(out_dir / "relation_flip.csv"))
+        self.assertEqual(result["enable_suppress_csv"], str(out_dir / "enable_suppress.csv"))
+        self.assertEqual(result["multistate_summary"], str(out_dir / "multistate_summary.md"))
 
 
 def _write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, str]]) -> None:

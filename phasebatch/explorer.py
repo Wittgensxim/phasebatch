@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+from collections import Counter
 from pathlib import Path
 
 from .cli import analyze_state
@@ -8,7 +9,7 @@ from .config import load_passes
 from .normalizer import canonical_hash
 from .profiler import validate_passes
 from .runner import prepare_input_ir
-from .schema import STATE_FIELDS, STATE_TRANSITION_FIELDS
+from .schema import ENABLE_SUPPRESS_FIELDS, RELATION_FLIP_FIELDS, STATE_FIELDS, STATE_TRANSITION_FIELDS
 from .tools import collect_toolchain, write_metadata
 
 
@@ -54,6 +55,8 @@ def explore_states(
 
     state_rows: list[dict] = []
     transition_rows: list[dict] = []
+    relation_flip_rows: list[dict] = []
+    enable_suppress_rows: list[dict] = []
     canonical_rows_by_id: dict[str, dict] = {}
     hash_to_state_id: dict[str, str] = {root_hash: "S0000"}
     frontier: list[dict] = []
@@ -163,9 +166,16 @@ def explore_states(
 
             state_rows.append(child_row)
             transition_rows.append(_transition_row(program, parent, child_row, active, is_duplicate, duplicate_of))
+            relation_flip_rows.extend(_relation_flip_rows(program, parent, child_row, active.get("pass", "")))
+            enable_suppress_rows.extend(
+                _enable_suppress_rows(program, parent, child_row, active.get("pass", ""), valid_passes)
+            )
 
     _write_csv(out_dir / "states.csv", STATE_FIELDS, state_rows)
     _write_csv(out_dir / "state_transitions.csv", STATE_TRANSITION_FIELDS, transition_rows)
+    _write_csv(out_dir / "relation_flip.csv", RELATION_FLIP_FIELDS, relation_flip_rows)
+    _write_csv(out_dir / "enable_suppress.csv", ENABLE_SUPPRESS_FIELDS, enable_suppress_rows)
+    _write_multistate_summary(out_dir / "multistate_summary.md", state_rows, transition_rows, relation_flip_rows, enable_suppress_rows)
     return {
         "program": program,
         "out_dir": str(out_dir),
@@ -173,6 +183,9 @@ def explore_states(
         "transitions": len(transition_rows),
         "states_csv": str(out_dir / "states.csv"),
         "state_transitions_csv": str(out_dir / "state_transitions.csv"),
+        "relation_flip_csv": str(out_dir / "relation_flip.csv"),
+        "enable_suppress_csv": str(out_dir / "enable_suppress.csv"),
+        "multistate_summary": str(out_dir / "multistate_summary.md"),
     }
 
 
@@ -303,6 +316,165 @@ def _transition_row(
     }
 
 
+def _relation_flip_rows(program: str, parent: dict, child: dict, transition_pass: str) -> list[dict]:
+    parent_pairs = _pair_relation_map(Path(parent["state_dir"]) / "pair_relation.csv")
+    child_pairs = _pair_relation_map(Path(child["state_dir"]) / "pair_relation.csv")
+    rows = []
+    for pass_a, pass_b in sorted(parent_pairs.keys() | child_pairs.keys()):
+        parent_present = (pass_a, pass_b) in parent_pairs
+        child_present = (pass_a, pass_b) in child_pairs
+        parent_relation = parent_pairs.get((pass_a, pass_b), "")
+        child_relation = child_pairs.get((pass_a, pass_b), "")
+        rows.append(
+            {
+                "program": program,
+                "parent_state_id": parent["state_id"],
+                "child_state_id": child["state_id"],
+                "transition_pass": transition_pass,
+                "pass_a": pass_a,
+                "pass_b": pass_b,
+                "parent_relation": parent_relation,
+                "child_relation": child_relation,
+                "flip_kind": _classify_relation_flip(
+                    parent_relation,
+                    child_relation,
+                    parent_present=parent_present,
+                    child_present=child_present,
+                ),
+            }
+        )
+    return rows
+
+
+def _pair_relation_map(path: Path) -> dict[tuple[str, str], str]:
+    relations: dict[tuple[str, str], str] = {}
+    for row in _read_csv(path):
+        pass_a = row.get("pass_a", "")
+        pass_b = row.get("pass_b", "")
+        if not pass_a or not pass_b:
+            continue
+        key = tuple(sorted([pass_a, pass_b]))
+        relations[key] = row.get("final_relation", "")
+    return relations
+
+
+def _classify_relation_flip(
+    parent_relation: str,
+    child_relation: str,
+    *,
+    parent_present: bool,
+    child_present: bool,
+) -> str:
+    if not parent_present and child_present:
+        return "missing_to_active_pair"
+    if parent_present and not child_present:
+        return "active_pair_to_missing"
+    if parent_relation == child_relation:
+        return "same"
+
+    parent_unknown = _is_unknown_relation(parent_relation)
+    child_unknown = _is_unknown_relation(child_relation)
+    if not parent_unknown and child_unknown:
+        return "known_to_unknown"
+    if parent_unknown and not child_unknown:
+        return "unknown_to_known"
+    if parent_relation == "final_commute" and child_relation == "final_order_sensitive":
+        return "commute_to_sensitive"
+    if parent_relation == "final_order_sensitive" and child_relation == "final_commute":
+        return "sensitive_to_commute"
+    return "other_flip"
+
+
+def _enable_suppress_rows(
+    program: str,
+    parent: dict,
+    child: dict,
+    transition_pass: str,
+    valid_passes: list[str],
+) -> list[dict]:
+    parent_profiles = _profile_map(Path(parent["state_dir"]) / "pass_profile.csv")
+    child_profiles = _profile_map(Path(child["state_dir"]) / "pass_profile.csv")
+    rows = []
+    for affected_pass in valid_passes:
+        parent_row = parent_profiles.get(affected_pass)
+        child_row = child_profiles.get(affected_pass)
+        parent_status = _profile_status(parent_row)
+        child_status = _profile_status(child_row)
+        rows.append(
+            {
+                "program": program,
+                "parent_state_id": parent["state_id"],
+                "child_state_id": child["state_id"],
+                "transition_pass": transition_pass,
+                "affected_pass": affected_pass,
+                "parent_status": parent_status,
+                "child_status": child_status,
+                "relation": _classify_enable_suppress(parent_row, child_row),
+                "parent_inst_delta": _profile_value(parent_row, "inst_delta"),
+                "child_inst_delta": _profile_value(child_row, "inst_delta"),
+                "parent_blocks_changed": _profile_value(parent_row, "blocks_changed"),
+                "child_blocks_changed": _profile_value(child_row, "blocks_changed"),
+                "parent_changed_functions": _profile_value(parent_row, "changed_functions"),
+                "child_changed_functions": _profile_value(child_row, "changed_functions"),
+            }
+        )
+    return rows
+
+
+def _profile_map(path: Path) -> dict[str, dict]:
+    profiles = {}
+    for row in _read_csv(path):
+        pass_name = row.get("pass", "")
+        if pass_name:
+            profiles[pass_name] = row
+    return profiles
+
+
+def _profile_status(row: dict | None) -> str:
+    if not row or not _is_true(row.get("success")):
+        return "failed_or_unknown"
+    if _is_true(row.get("active")):
+        return "active"
+    if str(row.get("active", "")).strip():
+        return "dormant"
+    return "failed_or_unknown"
+
+
+def _classify_enable_suppress(parent_row: dict | None, child_row: dict | None) -> str:
+    parent_status = _profile_status(parent_row)
+    child_status = _profile_status(child_row)
+    if parent_status == "failed_or_unknown" or child_status == "failed_or_unknown":
+        return "failed_or_unknown"
+    if parent_status == "dormant" and child_status == "active":
+        return "enable"
+    if parent_status == "active" and child_status == "dormant":
+        return "suppress"
+    if parent_status == "active" and child_status == "active":
+        if _profile_effect(parent_row) != _profile_effect(child_row):
+            return "effect_changed"
+        return "still_active_similar"
+    return "still_dormant"
+
+
+def _profile_effect(row: dict | None) -> tuple[str, str, str, str]:
+    return (
+        _profile_value(row, "inst_delta"),
+        _profile_value(row, "blocks_changed"),
+        _profile_value(row, "changed_functions"),
+        _profile_value(row, "changed_blocks"),
+    )
+
+
+def _profile_value(row: dict | None, field: str) -> str:
+    if not row:
+        return ""
+    return row.get(field, "")
+
+
+def _is_unknown_relation(relation: str) -> bool:
+    return not relation or "unknown" in relation.lower()
+
+
 def _read_csv(path: Path) -> list[dict]:
     if not path.exists():
         return []
@@ -336,3 +508,79 @@ def _to_int(value: object) -> int:
         return int(str(value))
     except (TypeError, ValueError):
         return 0
+
+
+def _write_multistate_summary(
+    path: Path,
+    state_rows: list[dict],
+    transition_rows: list[dict],
+    relation_flip_rows: list[dict],
+    enable_suppress_rows: list[dict],
+) -> None:
+    flip_counts = Counter(row.get("flip_kind", "") for row in relation_flip_rows if row.get("flip_kind"))
+    relation_counts = Counter(row.get("relation", "") for row in enable_suppress_rows if row.get("relation"))
+    lines = [
+        "# Multistate Summary",
+        "",
+        f"- states: {len(state_rows)}",
+        f"- transitions: {len(transition_rows)}",
+        f"- relation_flip_rows: {len(relation_flip_rows)}",
+        f"- enable_suppress_rows: {len(enable_suppress_rows)}",
+        "",
+        "## Top relation flips",
+        "",
+    ]
+    lines.extend(_counter_table(["flip_kind", "count"], flip_counts))
+    lines.extend(["", "## Top relation flip edges", ""])
+    lines.extend(
+        _counter_table(
+            ["flip_kind", "transition_pass", "pass_pair", "count"],
+            _top_relation_flip_edges(relation_flip_rows),
+        )
+    )
+    lines.extend(["", "## Enable/suppress counts", ""])
+    lines.extend(_counter_table(["relation", "count"], relation_counts))
+    for relation in ["enable", "suppress", "effect_changed"]:
+        title = relation.replace("_", " ")
+        lines.extend(["", f"## Top {title} edges", ""])
+        lines.extend(
+            _counter_table(
+                ["transition_pass", "affected_pass", "count"],
+                _top_enable_suppress_edges(enable_suppress_rows, relation),
+            )
+        )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _top_relation_flip_edges(rows: list[dict]) -> Counter:
+    selected = [row for row in rows if row.get("flip_kind") != "same"]
+    if not selected:
+        selected = rows
+    return Counter(
+        (
+            row.get("flip_kind", ""),
+            row.get("transition_pass", ""),
+            f"{row.get('pass_a', '')} + {row.get('pass_b', '')}",
+        )
+        for row in selected
+    )
+
+
+def _top_enable_suppress_edges(rows: list[dict], relation: str) -> Counter:
+    return Counter(
+        (row.get("transition_pass", ""), row.get("affected_pass", ""))
+        for row in rows
+        if row.get("relation") == relation
+    )
+
+
+def _counter_table(headers: list[str], counter: Counter) -> list[str]:
+    if not counter:
+        return ["none"]
+
+    lines = [f"| {' | '.join(headers)} |", f"| {' | '.join(['---'] * len(headers))} |"]
+    for key, count in counter.most_common(10):
+        cells = list(key) if isinstance(key, tuple) else [key]
+        cells.append(str(count))
+        lines.append(f"| {' | '.join(cells)} |")
+    return lines

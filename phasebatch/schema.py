@@ -147,6 +147,35 @@ STATE_TRANSITION_FIELDS = [
     "ir_path",
 ]
 
+RELATION_FLIP_FIELDS = [
+    "program",
+    "parent_state_id",
+    "child_state_id",
+    "transition_pass",
+    "pass_a",
+    "pass_b",
+    "parent_relation",
+    "child_relation",
+    "flip_kind",
+]
+
+ENABLE_SUPPRESS_FIELDS = [
+    "program",
+    "parent_state_id",
+    "child_state_id",
+    "transition_pass",
+    "affected_pass",
+    "parent_status",
+    "child_status",
+    "relation",
+    "parent_inst_delta",
+    "child_inst_delta",
+    "parent_blocks_changed",
+    "child_blocks_changed",
+    "parent_changed_functions",
+    "child_changed_functions",
+]
+
 
 @dataclass
 class RunResult:

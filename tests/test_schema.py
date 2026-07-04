@@ -1,9 +1,11 @@
 import unittest
 
 from phasebatch.schema import (
+    ENABLE_SUPPRESS_FIELDS,
     PAIR_RELATION_FIELDS,
     PASS_PROFILE_FIELDS,
     PER_STATE_SUMMARY_FIELDS,
+    RELATION_FLIP_FIELDS,
     STATE_FIELDS,
     STATE_TRANSITION_FIELDS,
 )
@@ -60,5 +62,40 @@ class SchemaTests(unittest.TestCase):
                 "is_duplicate",
                 "duplicate_of",
                 "ir_path",
+            ],
+        )
+
+    def test_cross_state_interaction_csv_schemas_are_present(self) -> None:
+        self.assertEqual(
+            RELATION_FLIP_FIELDS,
+            [
+                "program",
+                "parent_state_id",
+                "child_state_id",
+                "transition_pass",
+                "pass_a",
+                "pass_b",
+                "parent_relation",
+                "child_relation",
+                "flip_kind",
+            ],
+        )
+        self.assertEqual(
+            ENABLE_SUPPRESS_FIELDS,
+            [
+                "program",
+                "parent_state_id",
+                "child_state_id",
+                "transition_pass",
+                "affected_pass",
+                "parent_status",
+                "child_status",
+                "relation",
+                "parent_inst_delta",
+                "child_inst_delta",
+                "parent_blocks_changed",
+                "child_blocks_changed",
+                "parent_changed_functions",
+                "child_changed_functions",
             ],
         )
