@@ -54,7 +54,15 @@ def build_parser() -> argparse.ArgumentParser:
     explore_batches_parser.add_argument("--max-depth", type=int, default=1, help="Maximum batch exploration depth.")
     explore_batches_parser.add_argument("--max-component-size", type=int, default=10, help="Maximum exact conflict component size.")
     explore_batches_parser.add_argument("--max-batch-candidates", type=int, default=50, help="Maximum batch candidates per state.")
-    explore_batches_parser.add_argument("--validate-batches", action="store_true", help="Validate root batch candidates before applying them.")
+    explore_batches_parser.add_argument("--max-batches-per-state", type=int, default=20, help="Maximum batch candidates to apply per state.")
+    explore_batches_parser.add_argument("--max-frontier-states", type=int, default=20, help="Maximum non-duplicate frontier states to keep after each depth.")
+    explore_batches_parser.add_argument(
+        "--batch-frontier-policy",
+        choices=["all", "largest-batch", "certified-first", "diverse-hash"],
+        default="all",
+        help="Policy for selecting batches and frontier states.",
+    )
+    explore_batches_parser.add_argument("--validate-batches", action="store_true", help="Validate batch candidates before applying them.")
     explore_batches_parser.add_argument(
         "--allow-sampled-batches",
         action="store_true",
@@ -147,6 +155,9 @@ def _run_explore_batches(args: argparse.Namespace) -> int:
         max_depth=args.max_depth,
         max_component_size=args.max_component_size,
         max_batch_candidates=args.max_batch_candidates,
+        max_batches_per_state=args.max_batches_per_state,
+        max_frontier_states=args.max_frontier_states,
+        batch_frontier_policy=args.batch_frontier_policy,
         validate_batches=args.validate_batches,
         allow_sampled_batches=args.allow_sampled_batches,
     )
@@ -202,7 +213,10 @@ def run_explore_batches(
     max_depth: int,
     max_component_size: int,
     max_batch_candidates: int,
-    validate_batches: bool,
+    max_batches_per_state: int = 20,
+    max_frontier_states: int = 20,
+    batch_frontier_policy: str = "all",
+    validate_batches: bool = False,
     allow_sampled_batches: bool = False,
 ) -> dict:
     return explore_batches(
@@ -215,6 +229,9 @@ def run_explore_batches(
         max_depth=max_depth,
         max_component_size=max_component_size,
         max_batch_candidates=max_batch_candidates,
+        max_batches_per_state=max_batches_per_state,
+        max_frontier_states=max_frontier_states,
+        batch_frontier_policy=batch_frontier_policy,
         validate_batches=validate_batches,
         allow_sampled_batches=allow_sampled_batches,
     )
@@ -231,7 +248,10 @@ def explore_batches(
     max_depth: int,
     max_component_size: int,
     max_batch_candidates: int,
-    validate_batches: bool,
+    max_batches_per_state: int = 20,
+    max_frontier_states: int = 20,
+    batch_frontier_policy: str = "all",
+    validate_batches: bool = False,
     allow_sampled_batches: bool = False,
 ) -> dict:
     from .batch_explorer import explore_batches as explore_batches_impl
@@ -246,6 +266,9 @@ def explore_batches(
         max_depth=max_depth,
         max_component_size=max_component_size,
         max_batch_candidates=max_batch_candidates,
+        max_batches_per_state=max_batches_per_state,
+        max_frontier_states=max_frontier_states,
+        batch_frontier_policy=batch_frontier_policy,
         validate_batches=validate_batches,
         allow_sampled_batches=allow_sampled_batches,
     )

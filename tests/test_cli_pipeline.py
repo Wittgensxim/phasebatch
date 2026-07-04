@@ -139,6 +139,9 @@ class CliPipelineTests(unittest.TestCase):
                     max_depth=1,
                     max_component_size=10,
                     max_batch_candidates=50,
+                    max_batches_per_state=7,
+                    max_frontier_states=3,
+                    batch_frontier_policy="largest-batch",
                     validate_batches=True,
                     allow_sampled_batches=True,
                 )
@@ -153,6 +156,9 @@ class CliPipelineTests(unittest.TestCase):
             max_depth=1,
             max_component_size=10,
             max_batch_candidates=50,
+            max_batches_per_state=7,
+            max_frontier_states=3,
+            batch_frontier_policy="largest-batch",
             validate_batches=True,
             allow_sampled_batches=True,
         )

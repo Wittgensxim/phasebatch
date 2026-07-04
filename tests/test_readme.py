@@ -16,6 +16,9 @@ class ReadmeTests(unittest.TestCase):
         self.assertIn("batch_state_transitions.csv", readme)
         self.assertIn("batch_explore_summary.md", readme)
         self.assertIn("--allow-sampled-batches", readme)
+        self.assertIn("--max-batches-per-state", readme)
+        self.assertIn("--max-frontier-states", readme)
+        self.assertIn("--batch-frontier-policy", readme)
         self.assertIn("skipped_batches.csv", readme)
         self.assertIn("does not run opt", readme)
 

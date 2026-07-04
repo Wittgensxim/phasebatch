@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from phasebatch.batch_explorer import explore_batches
+from phasebatch.batch_explorer import _select_candidate_batches, _select_next_frontier, explore_batches
 from phasebatch.schema import BATCH_VALIDATION_FIELDS, RunResult
 
 
@@ -153,6 +153,88 @@ class BatchExplorerTests(unittest.TestCase):
         self.assertIn("batch transitions: 4", summary)
         self.assertIn("total batch candidates: 4", summary)
 
+    def test_max_batches_per_state_caps_applied_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result, out_dir, _fake_analyze = _run_fake_batch_explore(
+                Path(tmp),
+                validate_batches=False,
+                unique_outputs=True,
+                max_batches_per_state=1,
+            )
+
+            transitions = _read_csv(out_dir / "batch_state_transitions.csv")
+            summary = (out_dir / "batch_explore_summary.md").read_text(encoding="utf-8")
+
+        self.assertEqual(result["states"], 2)
+        self.assertEqual(result["batch_transitions"], 1)
+        self.assertEqual([row["batch_id"] for row in transitions], ["B0000"])
+        self.assertIn("total batch candidates: 2", summary)
+        self.assertIn("selected batch candidates: 1", summary)
+
+    def test_certified_first_policy_sorts_before_batch_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result, out_dir, _fake_analyze = _run_fake_batch_explore(
+                Path(tmp),
+                validate_batches=True,
+                validation_statuses={"B0000": "not_validated", "B0001": "all_permutations_same"},
+                unique_outputs=True,
+                max_batches_per_state=1,
+                batch_frontier_policy="certified-first",
+            )
+
+            transitions = _read_csv(out_dir / "batch_state_transitions.csv")
+            skipped = _read_csv(out_dir / "skipped_batches.csv")
+
+        self.assertEqual(result["batch_transitions"], 1)
+        self.assertEqual(skipped, [])
+        self.assertEqual(transitions[0]["batch_id"], "B0001")
+        self.assertEqual(transitions[0]["validation_status"], "all_permutations_same")
+
+    def test_max_frontier_states_caps_next_depth_expansion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result, out_dir, _fake_analyze = _run_fake_batch_explore(
+                Path(tmp),
+                validate_batches=False,
+                max_depth=2,
+                unique_outputs=True,
+                max_frontier_states=1,
+            )
+
+            states = _read_csv(out_dir / "states.csv")
+            transitions = _read_csv(out_dir / "batch_state_transitions.csv")
+
+        self.assertEqual(result["states"], 4)
+        self.assertEqual(result["batch_transitions"], 3)
+        self.assertEqual([row["depth"] for row in states], ["0", "1", "1", "2"])
+        self.assertEqual([row["parent_state_id"] for row in transitions], ["S0000", "S0000", "S0001"])
+
+    def test_largest_batch_policy_prefers_larger_candidates(self) -> None:
+        rows = [
+            {"batch_id": "small", "batch_size": "1"},
+            {"batch_id": "large", "batch_size": "4"},
+            {"batch_id": "medium", "batch_size": "2"},
+        ]
+
+        selected = _select_candidate_batches(
+            rows,
+            validation_map={},
+            policy="largest-batch",
+            max_batches_per_state=2,
+        )
+
+        self.assertEqual([row["batch_id"] for row in selected], ["large", "medium"])
+
+    def test_diverse_hash_policy_keeps_unique_hashes_first(self) -> None:
+        rows = [
+            {"state_id": "S0001", "state_hash": "h1"},
+            {"state_id": "S0002", "state_hash": "h1"},
+            {"state_id": "S0003", "state_hash": "h2"},
+        ]
+
+        selected = _select_next_frontier(rows, max_frontier_states=2, batch_frontier_policy="diverse-hash")
+
+        self.assertEqual([row["state_id"] for row in selected], ["S0001", "S0003"])
+
 
 def _run_fake_batch_explore(
     root: Path,
@@ -162,6 +244,9 @@ def _run_fake_batch_explore(
     validation_statuses: dict[str, str] | None = None,
     max_depth: int = 1,
     unique_outputs: bool = False,
+    max_batches_per_state: int = 20,
+    max_frontier_states: int = 20,
+    batch_frontier_policy: str = "all",
 ):
     input_path = root / "input.ll"
     input_path.write_text("define i32 @f() {\n  ret i32 0\n}\n", encoding="utf-8")
@@ -400,6 +485,9 @@ def _run_fake_batch_explore(
             max_batch_candidates=50,
             validate_batches=validate_batches,
             allow_sampled_batches=allow_sampled_batches,
+            max_batches_per_state=max_batches_per_state,
+            max_frontier_states=max_frontier_states,
+            batch_frontier_policy=batch_frontier_policy,
         )
 
     return result, out_dir, fake_analyze

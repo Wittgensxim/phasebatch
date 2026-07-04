@@ -46,6 +46,9 @@ def explore_batches(
     max_batch_candidates: int,
     validate_batches: bool,
     allow_sampled_batches: bool = False,
+    max_batches_per_state: int = 20,
+    max_frontier_states: int = 20,
+    batch_frontier_policy: str = "all",
 ) -> dict:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -67,6 +70,9 @@ def explore_batches(
             "max_depth": max_depth,
             "max_component_size": max_component_size,
             "max_batch_candidates": max_batch_candidates,
+            "max_batches_per_state": max_batches_per_state,
+            "max_frontier_states": max_frontier_states,
+            "batch_frontier_policy": batch_frontier_policy,
             "validate_batches": validate_batches,
             "allow_sampled_batches": allow_sampled_batches,
             "exploration_mode": "batches",
@@ -110,6 +116,7 @@ def explore_batches(
     hash_to_state_id: dict[str, str] = {root_hash: "S0000"}
     next_state_number = 1
     total_batch_candidates = 0
+    selected_batch_candidates = 0
     root_batch_result: dict = {}
 
     root_row = _state_row_from_summary(
@@ -145,11 +152,18 @@ def explore_batches(
             candidate_rows = _read_csv(parent_dir / "batch_candidates.csv")
             total_batch_candidates += len(candidate_rows)
             validation_map = _validation_status_map(parent_dir / "batch_validation.csv")
+            selected_candidates = _select_candidate_batches(
+                candidate_rows,
+                validation_map=validation_map,
+                policy=batch_frontier_policy,
+                max_batches_per_state=max_batches_per_state,
+            )
+            selected_batch_candidates += len(selected_candidates)
             parent_input = _state_input_path(parent)
             if not parent_input.exists():
                 continue
 
-            for candidate in candidate_rows:
+            for candidate in selected_candidates:
                 result = _apply_batch_candidate(
                     candidate,
                     parent=parent,
@@ -184,7 +198,11 @@ def explore_batches(
                 if result["frontier_row"]:
                     next_frontier.append(result["frontier_row"])
 
-        frontier = _select_next_frontier(next_frontier)
+        frontier = _select_next_frontier(
+            next_frontier,
+            max_frontier_states=max_frontier_states,
+            batch_frontier_policy=batch_frontier_policy,
+        )
 
     if not root_batch_result:
         root_batch_result = build_batch_family(
@@ -195,6 +213,7 @@ def explore_batches(
         if validate_batches:
             validate_batch_candidates(root_dir, tools, timeout=timeout, jobs=jobs)
         total_batch_candidates = int(root_batch_result.get("batch_candidates", 0) or 0)
+        selected_batch_candidates = 0
 
     _write_csv(out_dir / "states.csv", STATE_FIELDS, state_rows)
     _write_csv(out_dir / "state_transitions.csv", STATE_TRANSITION_FIELDS, state_transition_rows)
@@ -212,6 +231,7 @@ def explore_batches(
         transitions=batch_transition_rows,
         skipped_batches=skipped_batch_rows,
         total_batch_candidates=total_batch_candidates,
+        selected_batch_candidates=selected_batch_candidates,
         validate_batches=validate_batches,
         allow_sampled_batches=allow_sampled_batches,
     )
@@ -369,8 +389,73 @@ def _materialize_state_input(state_dir: Path, source_ir: Path) -> Path:
     return input_ll
 
 
-def _select_next_frontier(rows: list[dict]) -> list[dict]:
-    return rows
+def _select_candidate_batches(
+    rows: list[dict],
+    *,
+    validation_map: dict[str, str],
+    policy: str,
+    max_batches_per_state: int,
+) -> list[dict]:
+    if max_batches_per_state <= 0:
+        return []
+
+    indexed = list(enumerate(rows))
+    if policy in {"all", "diverse-hash"}:
+        ordered = indexed
+    elif policy == "largest-batch":
+        ordered = sorted(indexed, key=lambda item: (-_to_int(item[1].get("batch_size")), item[0]))
+    elif policy == "certified-first":
+        ordered = sorted(
+            indexed,
+            key=lambda item: (
+                _validation_selection_rank(validation_map.get(item[1].get("batch_id", ""), "not_validated")),
+                item[0],
+            ),
+        )
+    else:
+        raise ValueError(f"unknown batch frontier policy: {policy}")
+
+    return [row for _, row in ordered[:max_batches_per_state]]
+
+
+def _select_next_frontier(
+    rows: list[dict],
+    *,
+    max_frontier_states: int,
+    batch_frontier_policy: str,
+) -> list[dict]:
+    if max_frontier_states <= 0:
+        return []
+    if batch_frontier_policy != "diverse-hash":
+        return rows[:max_frontier_states]
+
+    unique: list[dict] = []
+    repeated: list[dict] = []
+    seen_hashes: set[str] = set()
+    for row in rows:
+        state_hash = row.get("state_hash", "")
+        if state_hash and state_hash not in seen_hashes:
+            unique.append(row)
+            seen_hashes.add(state_hash)
+        else:
+            repeated.append(row)
+    return (unique + repeated)[:max_frontier_states]
+
+
+def _validation_selection_rank(status: str) -> int:
+    return {
+        "all_permutations_same": 0,
+        "sampled_same": 1,
+        "not_validated": 2,
+        "": 2,
+    }.get(status, 3)
+
+
+def _to_int(value: object) -> int:
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _validation_status_map(path: Path) -> dict[str, str]:
@@ -483,6 +568,7 @@ def _write_batch_explore_summary(
     transitions: list[dict],
     skipped_batches: list[dict],
     total_batch_candidates: int,
+    selected_batch_candidates: int,
     validate_batches: bool,
     allow_sampled_batches: bool,
 ) -> None:
@@ -499,6 +585,7 @@ def _write_batch_explore_summary(
         f"- batch transitions: {len(transitions)}",
         f"- duplicate states: {duplicate_states}",
         f"- total batch candidates: {total_batch_candidates}",
+        f"- selected batch candidates: {selected_batch_candidates}",
         f"- executed batches: {len(transitions)}",
         f"- skipped batches: {len(skipped_batches)}",
         f"- validate batches: {_bool(validate_batches)}",

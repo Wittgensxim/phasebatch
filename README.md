@@ -50,6 +50,9 @@ python -m phasebatch explore-batches \
   --max-depth 1 \
   --max-component-size 10 \
   --max-batch-candidates 50 \
+  --max-batches-per-state 20 \
+  --max-frontier-states 20 \
+  --batch-frontier-policy all \
   --validate-batches \
   --allow-sampled-batches \
   --jobs 8 \
@@ -102,7 +105,11 @@ duplicate child hashes, and writes `batch_state_transitions.csv`, `skipped_batch
 `batch_explore_summary.md`. When `--validate-batches` is enabled, only
 `all_permutations_same` candidates are applied by default. Add
 `--allow-sampled-batches` to also apply `sampled_same` candidates. `mismatch`
-and `failed` candidates are never applied.
+and `failed` candidates are never applied. Use `--max-batches-per-state` to cap
+how many selected batch candidates are applied from each state, use
+`--max-frontier-states` to cap non-duplicate states kept after each depth, and
+choose `--batch-frontier-policy all`, `largest-batch`, `certified-first`, or
+`diverse-hash` to order batch/frontier selection.
 The `batchify` command consumes an existing state directory, reads only
 `pass_profile.csv` and `pair_relation.csv`, and writes `batch_components.csv`,
 `batch_candidates.csv`, `batch_summary.csv`, and `batch_summary.md`. It does not run opt

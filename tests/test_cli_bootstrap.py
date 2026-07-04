@@ -80,6 +80,9 @@ class CliBootstrapTests(unittest.TestCase):
         self.assertIn("--max-depth", result.stdout)
         self.assertIn("--max-component-size", result.stdout)
         self.assertIn("--max-batch-candidates", result.stdout)
+        self.assertIn("--max-batches-per-state", result.stdout)
+        self.assertIn("--max-frontier-states", result.stdout)
+        self.assertIn("--batch-frontier-policy", result.stdout)
         self.assertIn("--validate-batches", result.stdout)
         self.assertIn("--allow-sampled-batches", result.stdout)
 
