@@ -147,11 +147,39 @@ class BatchExplorerTests(unittest.TestCase):
                             "inst_delta": "0",
                             "blocks_changed": "0",
                             "changed_functions": "",
+                        },
+                        {
+                            "program": "batch_explore",
+                            "state_id": state_id,
+                            "depth": str(depth),
+                            "parent_state_id": parent_state_id,
+                            "transition_pass": transition_pass,
+                            "state_hash": "child-hash",
+                            "pass": "pass-b",
+                            "success": "true",
+                            "active": "true",
+                            "output_hash": "next-hash",
+                            "output_path": str(state_dir / "next.ll"),
+                            "inst_delta": "-3",
+                            "blocks_changed": "2",
+                            "changed_functions": "f,g",
                         }
                     ],
                 )
-                _write_csv(state_dir / "pair_relation.csv", ["program", "state_id", "pass_a", "pass_b", "final_relation"], [])
-                _write_summary(state_dir, state_id, "child-hash", "0", "2", "0", "0", "7")
+                _write_csv(
+                    state_dir / "pair_relation.csv",
+                    ["program", "state_id", "pass_a", "pass_b", "final_relation"],
+                    [
+                        {
+                            "program": "batch_explore",
+                            "state_id": state_id,
+                            "pass_a": "pass-a",
+                            "pass_b": "pass-b",
+                            "final_relation": "final_commute",
+                        }
+                    ],
+                )
+                _write_summary(state_dir, state_id, "child-hash", "1", "1", "1", "1", "7")
                 return {"program": "batch_explore", "state_id": state_id, "summary_path": str(state_dir / "summary.md")}
 
             def fake_run_opt(opt, src, passes, out, timeout):
@@ -179,7 +207,10 @@ class BatchExplorerTests(unittest.TestCase):
 
             states = _read_csv(out_dir / "states.csv")
             transitions = _read_csv(out_dir / "batch_state_transitions.csv")
+            enable_suppress = _read_csv(out_dir / "enable_suppress.csv")
+            relation_flips = _read_csv(out_dir / "relation_flip.csv")
             aggregate = _read_csv(out_dir / "aggregate_by_depth.csv")
+            multistate_summary = (out_dir / "multistate_summary.md").read_text(encoding="utf-8")
             summary = (out_dir / "batch_explore_summary.md").read_text(encoding="utf-8")
 
         self.assertEqual(result["states"], 3)
@@ -192,9 +223,22 @@ class BatchExplorerTests(unittest.TestCase):
         self.assertEqual(transitions[1]["is_duplicate"], "true")
         self.assertEqual(transitions[1]["duplicate_of"], "S0001")
         self.assertEqual(transitions[0]["validation_status"], "not_validated")
+        self.assertEqual(len(enable_suppress), 4)
+        self.assertIn("suppress", {row["relation"] for row in enable_suppress})
+        self.assertIn("effect_changed", {row["relation"] for row in enable_suppress})
+        self.assertEqual(len(relation_flips), 2)
+        self.assertEqual({row["flip_kind"] for row in relation_flips}, {"sensitive_to_commute"})
         self.assertEqual(aggregate[1]["state_cache_hits"], "1")
+        self.assertEqual(aggregate[1]["suppress_count"], "2")
+        self.assertEqual(aggregate[1]["effect_changed_count"], "2")
+        self.assertEqual(aggregate[1]["relation_flip_count"], "2")
+        self.assertEqual(aggregate[1]["true_relation_flip_count"], "2")
+        self.assertIn("Enable/suppress counts", multistate_summary)
+        self.assertIn("True relation flips among pairs active in both states", multistate_summary)
         self.assertIn("Batch Explore Summary", summary)
         self.assertIn("batch transitions: 2", summary)
+        self.assertEqual(result["enable_suppress_csv"], str(out_dir / "enable_suppress.csv"))
+        self.assertEqual(result["relation_flip_csv"], str(out_dir / "relation_flip.csv"))
         self.assertEqual(result["batch_state_transitions_csv"], str(out_dir / "batch_state_transitions.csv"))
         self.assertEqual(result["batch_explore_summary"], str(out_dir / "batch_explore_summary.md"))
 

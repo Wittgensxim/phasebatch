@@ -11,7 +11,9 @@ from .explorer import (
     _aggregate_by_depth,
     _bool,
     _duplicate_state_row,
+    _enable_suppress_rows,
     _read_csv,
+    _relation_flip_rows,
     _state_row_from_summary,
     _tool_paths,
     _write_csv,
@@ -20,7 +22,14 @@ from .explorer import (
 from .normalizer import canonical_hash
 from .profiler import validate_passes
 from .runner import prepare_input_ir, run_opt
-from .schema import AGGREGATE_BY_DEPTH_FIELDS, BATCH_STATE_TRANSITION_FIELDS, STATE_FIELDS, STATE_TRANSITION_FIELDS
+from .schema import (
+    AGGREGATE_BY_DEPTH_FIELDS,
+    BATCH_STATE_TRANSITION_FIELDS,
+    ENABLE_SUPPRESS_FIELDS,
+    RELATION_FLIP_FIELDS,
+    STATE_FIELDS,
+    STATE_TRANSITION_FIELDS,
+)
 from .tools import collect_toolchain, write_metadata
 
 
@@ -99,6 +108,8 @@ def explore_batches(
     state_rows: list[dict] = []
     batch_transition_rows: list[dict] = []
     state_transition_rows: list[dict] = []
+    enable_suppress_rows: list[dict] = []
+    relation_flip_rows: list[dict] = []
     canonical_rows_by_id: dict[str, dict] = {}
     hash_to_state_id: dict[str, str] = {root_hash: "S0000"}
     next_state_number = 1
@@ -194,10 +205,14 @@ def explore_batches(
             state_transition_rows.append(
                 _state_transition_row(program, root_row, child_row, batch_passes, str(child_ir), is_duplicate, duplicate_of)
             )
+            enable_suppress_rows.extend(_enable_suppress_rows(program, root_row, child_row, batch_passes, valid_passes))
+            relation_flip_rows.extend(_relation_flip_rows(program, root_row, child_row, batch_passes))
 
     _write_csv(out_dir / "states.csv", STATE_FIELDS, state_rows)
     _write_csv(out_dir / "state_transitions.csv", STATE_TRANSITION_FIELDS, state_transition_rows)
     _write_csv(out_dir / "batch_state_transitions.csv", BATCH_STATE_TRANSITION_FIELDS, batch_transition_rows)
+    _write_csv(out_dir / "enable_suppress.csv", ENABLE_SUPPRESS_FIELDS, enable_suppress_rows)
+    _write_csv(out_dir / "relation_flip.csv", RELATION_FLIP_FIELDS, relation_flip_rows)
     aggregate_rows = _aggregate_by_depth(out_dir, program)
     _write_csv(out_dir / "aggregate_by_depth.csv", AGGREGATE_BY_DEPTH_FIELDS, aggregate_rows)
     _write_multistate_summary(out_dir / "multistate_summary.md", out_dir, aggregate_rows)
@@ -216,6 +231,8 @@ def explore_batches(
         "batch_transitions": len(batch_transition_rows),
         "states_csv": str(out_dir / "states.csv"),
         "batch_state_transitions_csv": str(out_dir / "batch_state_transitions.csv"),
+        "enable_suppress_csv": str(out_dir / "enable_suppress.csv"),
+        "relation_flip_csv": str(out_dir / "relation_flip.csv"),
         "aggregate_by_depth_csv": str(out_dir / "aggregate_by_depth.csv"),
         "multistate_summary": str(out_dir / "multistate_summary.md"),
         "batch_explore_summary": str(out_dir / "batch_explore_summary.md"),

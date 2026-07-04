@@ -95,7 +95,8 @@ The `explore` command writes `states.csv`, `state_transitions.csv`, and one
 analysis directory per state under `states/`.
 The `explore-batches` command analyzes the root state, batchifies it, applies
 each batch candidate as a depth-1 transition, caches duplicate child hashes, and
-writes `batch_state_transitions.csv`, `states.csv`, `aggregate_by_depth.csv`,
+writes `batch_state_transitions.csv`, `enable_suppress.csv`,
+`relation_flip.csv`, `states.csv`, `aggregate_by_depth.csv`,
 `multistate_summary.md`, and `batch_explore_summary.md`.
 The `batchify` command consumes an existing state directory, reads only
 `pass_profile.csv` and `pair_relation.csv`, and writes `batch_components.csv`,
