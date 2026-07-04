@@ -48,6 +48,15 @@ def build_parser() -> argparse.ArgumentParser:
     explore.add_argument("--top-k", type=int, default=5, help="Frontier cap for top-k policies.")
     explore.set_defaults(func=_run_explore)
 
+    explore_batches_parser = subparsers.add_parser("explore-batches", help="Explore states using batch candidates.")
+    _add_common_args(explore_batches_parser)
+    explore_batches_parser.add_argument("--input", required=True, help="Input .c or .ll file.")
+    explore_batches_parser.add_argument("--max-depth", type=int, default=1, help="Maximum batch exploration depth.")
+    explore_batches_parser.add_argument("--max-component-size", type=int, default=10, help="Maximum exact conflict component size.")
+    explore_batches_parser.add_argument("--max-batch-candidates", type=int, default=50, help="Maximum batch candidates per state.")
+    explore_batches_parser.add_argument("--validate-batches", action="store_true", help="Validate root batch candidates before applying them.")
+    explore_batches_parser.set_defaults(func=_run_explore_batches)
+
     batchify = subparsers.add_parser("batchify", help="Build batch candidates for one analyzed state.")
     batchify.add_argument("--state-dir", required=True, help="State directory containing pass_profile.csv and pair_relation.csv.")
     batchify.add_argument("--max-component-size", type=int, default=10, help="Maximum exact conflict component size.")
@@ -122,6 +131,26 @@ def _run_explore(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_explore_batches(args: argparse.Namespace) -> int:
+    result = run_explore_batches(
+        Path(args.input),
+        Path(args.out),
+        Path(args.passes),
+        jobs=args.jobs,
+        timeout=args.timeout,
+        max_pairs=args.max_pairs,
+        max_depth=args.max_depth,
+        max_component_size=args.max_component_size,
+        max_batch_candidates=args.max_batch_candidates,
+        validate_batches=args.validate_batches,
+    )
+    print(
+        "batch-explored {program}: states={states} batch_transitions={batch_transitions} "
+        "states_csv={states_csv}".format(**result)
+    )
+    return 0
+
+
 def _run_batchify(args: argparse.Namespace) -> int:
     result = run_batchify(
         Path(args.state_dir),
@@ -155,6 +184,61 @@ def run_batchify(
     validation = validate_batch_candidates(state_dir, tools, timeout=10, jobs=1)
     result.update(validation)
     return result
+
+
+def run_explore_batches(
+    input_path: Path,
+    out_dir: Path,
+    passes_path: Path,
+    jobs: int,
+    timeout: int,
+    max_pairs: int | None,
+    max_depth: int,
+    max_component_size: int,
+    max_batch_candidates: int,
+    validate_batches: bool,
+) -> dict:
+    return explore_batches(
+        input_path,
+        out_dir,
+        passes_path,
+        jobs=jobs,
+        timeout=timeout,
+        max_pairs=max_pairs,
+        max_depth=max_depth,
+        max_component_size=max_component_size,
+        max_batch_candidates=max_batch_candidates,
+        validate_batches=validate_batches,
+    )
+
+
+def explore_batches(
+    input_path: Path,
+    out_dir: Path,
+    passes_path: Path,
+    *,
+    jobs: int,
+    timeout: int,
+    max_pairs: int | None,
+    max_depth: int,
+    max_component_size: int,
+    max_batch_candidates: int,
+    validate_batches: bool,
+) -> dict:
+    from .batch_explorer import explore_batches as explore_batches_impl
+
+    return explore_batches_impl(
+        input_path,
+        out_dir,
+        passes_path,
+        jobs=jobs,
+        timeout=timeout,
+        max_pairs=max_pairs,
+        max_depth=max_depth,
+        max_component_size=max_component_size,
+        max_batch_candidates=max_batch_candidates,
+        validate_batches=validate_batches,
+    )
 
 
 def run_analysis(

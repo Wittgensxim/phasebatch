@@ -4,6 +4,7 @@ from phasebatch.schema import (
     AGGREGATE_BY_DEPTH_FIELDS,
     BATCH_CANDIDATE_FIELDS,
     BATCH_COMPONENT_FIELDS,
+    BATCH_STATE_TRANSITION_FIELDS,
     BATCH_SUMMARY_FIELDS,
     BATCH_VALIDATION_FIELDS,
     ENABLE_SUPPRESS_FIELDS,
@@ -201,5 +202,21 @@ class SchemaTests(unittest.TestCase):
                 "first_mismatch_order",
                 "first_mismatch_hash",
                 "time_ms",
+            ],
+        )
+        self.assertEqual(
+            BATCH_STATE_TRANSITION_FIELDS,
+            [
+                "program",
+                "parent_state_id",
+                "child_state_id",
+                "batch_id",
+                "batch_passes",
+                "batch_size",
+                "parent_hash",
+                "child_hash",
+                "is_duplicate",
+                "duplicate_of",
+                "validation_status",
             ],
         )

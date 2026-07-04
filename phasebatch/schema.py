@@ -261,6 +261,20 @@ BATCH_VALIDATION_FIELDS = [
     "time_ms",
 ]
 
+BATCH_STATE_TRANSITION_FIELDS = [
+    "program",
+    "parent_state_id",
+    "child_state_id",
+    "batch_id",
+    "batch_passes",
+    "batch_size",
+    "parent_hash",
+    "child_hash",
+    "is_duplicate",
+    "duplicate_of",
+    "validation_status",
+]
+
 
 @dataclass
 class RunResult:

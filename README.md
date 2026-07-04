@@ -43,6 +43,18 @@ python -m phasebatch explore \
   --timeout 10 \
   --max-pairs 300
 
+python -m phasebatch explore-batches \
+  --input benchmarks/tiny/branch.c \
+  --out outputs/batch_explore_branch \
+  --passes configs/core_passes.yaml \
+  --max-depth 1 \
+  --max-component-size 10 \
+  --max-batch-candidates 50 \
+  --validate-batches \
+  --jobs 8 \
+  --timeout 10 \
+  --max-pairs 300
+
 python -m phasebatch batchify \
   --state-dir outputs/explore_branch/states/S0000 \
   --max-component-size 10 \
@@ -81,6 +93,10 @@ Each `analyze` output directory contains:
 The `batch` command also writes aggregate CSVs and `aggregate_summary.md`.
 The `explore` command writes `states.csv`, `state_transitions.csv`, and one
 analysis directory per state under `states/`.
+The `explore-batches` command analyzes the root state, batchifies it, applies
+each batch candidate as a depth-1 transition, caches duplicate child hashes, and
+writes `batch_state_transitions.csv`, `states.csv`, `aggregate_by_depth.csv`,
+`multistate_summary.md`, and `batch_explore_summary.md`.
 The `batchify` command consumes an existing state directory, reads only
 `pass_profile.csv` and `pair_relation.csv`, and writes `batch_components.csv`,
 `batch_candidates.csv`, `batch_summary.csv`, and `batch_summary.md`. It does not run opt

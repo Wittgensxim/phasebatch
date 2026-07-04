@@ -12,6 +12,9 @@ class ReadmeTests(unittest.TestCase):
         self.assertIn("--max-batch-candidates", readme)
         self.assertIn("--validate-batches", readme)
         self.assertIn("batch_validation.csv", readme)
+        self.assertIn("python -m phasebatch explore-batches", readme)
+        self.assertIn("batch_state_transitions.csv", readme)
+        self.assertIn("batch_explore_summary.md", readme)
         self.assertIn("does not run opt", readme)
 
 

@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from phasebatch.cli import analyze_state, run_analysis, run_batch, run_batchify
+from phasebatch.cli import analyze_state, run_analysis, run_batch, run_batchify, run_explore_batches
 
 
 class CliPipelineTests(unittest.TestCase):
@@ -120,3 +120,38 @@ class CliPipelineTests(unittest.TestCase):
         fake_collect.assert_called_once()
         fake_validate.assert_called_once_with(state_dir, {"opt": "opt"}, timeout=10, jobs=1)
         self.assertEqual(result["validated_batches"], 3)
+
+    def test_run_explore_batches_calls_batch_explorer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_path = root / "input.ll"
+            passes_path = root / "passes.yaml"
+            out_dir = root / "out"
+
+            with mock.patch("phasebatch.cli.explore_batches", return_value={"states": 2, "batch_transitions": 1}) as fake_explore:
+                result = run_explore_batches(
+                    input_path,
+                    out_dir,
+                    passes_path,
+                    jobs=8,
+                    timeout=10,
+                    max_pairs=300,
+                    max_depth=1,
+                    max_component_size=10,
+                    max_batch_candidates=50,
+                    validate_batches=True,
+                )
+
+        fake_explore.assert_called_once_with(
+            input_path,
+            out_dir,
+            passes_path,
+            jobs=8,
+            timeout=10,
+            max_pairs=300,
+            max_depth=1,
+            max_component_size=10,
+            max_batch_candidates=50,
+            validate_batches=True,
+        )
+        self.assertEqual(result["batch_transitions"], 1)
