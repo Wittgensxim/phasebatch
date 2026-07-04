@@ -9,7 +9,7 @@ from pathlib import Path
 from .config import load_passes
 from .graph import cluster_distribution_rows, write_cluster_distribution
 from .normalizer import canonical_hash
-from .pair_tester import test_pairs
+from .pair_tester import run_pair_tests
 from .profiler import profile_passes, validate_passes
 from .relation import annotate_pair_relations, write_pair_relations
 from .report import write_aggregate_report, write_per_state_summary, write_summary
@@ -235,7 +235,7 @@ def analyze_state(
     active_profiles = [row for row in profile_rows if row.get("success") == "true" and row.get("active") == "true"]
 
     pair_start = time.perf_counter()
-    pair_rows = test_pairs(input_ll, active_profiles, tools, out_dir, jobs, timeout, max_pairs)
+    pair_rows = run_pair_tests(input_ll, active_profiles, tools, out_dir, jobs, timeout, max_pairs)
     profile_map = {row["pass"]: row for row in profile_rows}
     pair_rows = annotate_pair_relations(pair_rows, profile_map)
     write_pair_relations(out_dir / "pair_relation.csv", pair_rows)

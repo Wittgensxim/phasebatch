@@ -16,7 +16,7 @@ class CliPipelineTests(unittest.TestCase):
 
             with mock.patch("phasebatch.cli.prepare_input_ir") as fake_prepare, \
                 mock.patch("phasebatch.cli.profile_passes", return_value=[{"program": "out", "state_id": "S0001", "depth": 1, "parent_state_id": "S0000", "transition_pass": "mem2reg", "state_hash": "s", "pass": "instcombine", "active": "true", "changed_functions": "f", "changed_blocks": "f::entry"}]) as fake_profile, \
-                mock.patch("phasebatch.cli.test_pairs", return_value=[]):
+                mock.patch("phasebatch.cli.run_pair_tests", return_value=[]):
                 result = analyze_state(
                     input_ll,
                     out_dir,

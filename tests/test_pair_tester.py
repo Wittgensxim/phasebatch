@@ -3,12 +3,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from phasebatch.pair_tester import test_pairs
+from phasebatch.pair_tester import run_pair_tests
 from phasebatch.schema import RunResult
 
 
 class PairTesterTests(unittest.TestCase):
-    def test_test_pairs_classifies_equal_hashes_as_commute(self) -> None:
+    def test_run_pair_tests_classifies_equal_hashes_as_commute(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             input_ll = root / "input.ll"
@@ -45,7 +45,7 @@ class PairTesterTests(unittest.TestCase):
                 return RunResult([opt], 0, "", "", 3.0)
 
             with mock.patch("phasebatch.pair_tester.run_opt", side_effect=fake_run_opt):
-                rows = test_pairs(input_ll, profiles, {"opt": "opt"}, root, jobs=1, timeout=1, max_pairs=None)
+                rows = run_pair_tests(input_ll, profiles, {"opt": "opt"}, root, jobs=1, timeout=1, max_pairs=None)
 
         self.assertEqual(rows[0]["dynamic_relation"], "dynamic_commute")
         self.assertEqual(rows[0]["same_hash"], "true")
@@ -54,7 +54,7 @@ class PairTesterTests(unittest.TestCase):
         self.assertEqual(rows[0]["parent_state_id"], "S0000")
         self.assertEqual(rows[0]["transition_pass"], "mem2reg")
 
-    def test_test_pairs_records_not_tested_when_max_pairs_caps_work(self) -> None:
+    def test_run_pair_tests_records_not_tested_when_max_pairs_caps_work(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             input_ll = root / "input.ll"
@@ -70,7 +70,7 @@ class PairTesterTests(unittest.TestCase):
                 return RunResult([opt], 0, "", "", 1.0)
 
             with mock.patch("phasebatch.pair_tester.run_opt", side_effect=fake_run_opt):
-                rows = test_pairs(input_ll, profiles, {"opt": "opt"}, root, jobs=1, timeout=1, max_pairs=1)
+                rows = run_pair_tests(input_ll, profiles, {"opt": "opt"}, root, jobs=1, timeout=1, max_pairs=1)
 
         self.assertEqual(len(rows), 3)
         self.assertEqual(sum(1 for row in rows if row["dynamic_relation"] == "not_tested"), 2)

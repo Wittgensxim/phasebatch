@@ -11,7 +11,7 @@ from .runner import run_opt
 from .schema import PAIR_RELATION_FIELDS
 
 
-def test_pairs(
+def run_pair_tests(
     input_ll: Path,
     active_profiles: list[dict],
     tools: dict,
