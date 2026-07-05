@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .normalizer import canonical_hash, count_ir_features
+from .pass_config import PassRegistry
 from .runner import run_opt
 from .schema import PAIR_RELATION_FIELDS
 
@@ -19,6 +20,7 @@ def run_pair_tests(
     jobs: int,
     timeout: int,
     max_pairs: int | None,
+    pass_registry: PassRegistry | None = None,
 ) -> list[dict]:
     out_dir = Path(out_dir)
     pair_dir = out_dir / "artifacts" / "pairs"
@@ -38,8 +40,10 @@ def run_pair_tests(
         current_dir.mkdir(parents=True, exist_ok=True)
         ab_path = current_dir / "ab.ll"
         ba_path = current_dir / "ba.ll"
-        ab = run_opt(str(tools["opt"]), input_ll, [pass_a, pass_b], ab_path, timeout)
-        ba = run_opt(str(tools["opt"]), input_ll, [pass_b, pass_a], ba_path, timeout)
+        pipeline_a = _pipeline_for(pass_a, pass_registry)
+        pipeline_b = _pipeline_for(pass_b, pass_registry)
+        ab = run_opt(str(tools["opt"]), input_ll, [pipeline_a, pipeline_b], ab_path, timeout)
+        ba = run_opt(str(tools["opt"]), input_ll, [pipeline_b, pipeline_a], ba_path, timeout)
         row = _base_row(input_ll, profile_a, profile_b, ab_path, ba_path)
         row["ab_success"] = _bool(ab.success)
         row["ba_success"] = _bool(ba.success)
@@ -160,3 +164,7 @@ def _is_true(value: object) -> bool:
 
 def _bool(value: bool) -> str:
     return "true" if value else "false"
+
+
+def _pipeline_for(pass_name: str, registry: PassRegistry | None) -> str:
+    return registry.pipeline_for(pass_name) if registry else pass_name

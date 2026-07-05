@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 
 from .normalizer import canonical_hash as hash_ir
+from .pass_config import PassRegistry, resolve_pipeline_sequence
 from .runner import run_opt
 from .schema import BATCH_CANDIDATE_FIELDS, BATCH_COMPONENT_FIELDS, BATCH_SUMMARY_FIELDS, BATCH_VALIDATION_FIELDS
 
@@ -103,6 +104,8 @@ def build_batch_family(
         components,
         component_infos,
         candidate_rows,
+        truncated,
+        max_batch_candidates,
     )
 
     _write_csv(state_dir / "batch_components.csv", BATCH_COMPONENT_FIELDS, component_rows)
@@ -132,8 +135,12 @@ def validate_batch_candidates(
     jobs: int,
     max_permutation_factorial: int = 120,
     samples: int = 20,
+    pass_registry: PassRegistry | None = None,
 ) -> dict:
     state_dir = Path(state_dir)
+    if pass_registry is None:
+        maybe_registry = tools.get("_pass_registry") if isinstance(tools, dict) else None
+        pass_registry = maybe_registry if isinstance(maybe_registry, PassRegistry) else None
     candidates = _read_csv(state_dir / "batch_candidates.csv")
     input_ll = _state_input_ll(state_dir)
     validation_root = state_dir / "artifacts" / "batch_validation"
@@ -150,6 +157,7 @@ def validate_batch_candidates(
                 jobs,
                 max_permutation_factorial,
                 samples,
+                pass_registry,
             )
         )
 
@@ -241,8 +249,10 @@ def _candidate_rows(
     alternative_lists = [component["alternatives"] for component in component_infos]
     unresolved_count = sum(1 for component in component_infos if not component["is_exact"])
     all_exact = unresolved_count == 0
+    if not alternative_lists:
+        return candidate_rows, truncated
 
-    for index, choices in enumerate(itertools.product(*alternative_lists) if alternative_lists else [()]):
+    for index, choices in enumerate(itertools.product(*alternative_lists)):
         if index >= max_batch_candidates:
             truncated = True
             break
@@ -280,6 +290,8 @@ def _summary_row(
     components: list[list[str]],
     component_infos: list[dict],
     candidate_rows: list[dict],
+    truncated: bool,
+    max_batch_candidates: int,
 ) -> dict:
     naive_orderings = math.factorial(len(active_passes))
     batch_count = len(candidate_rows)
@@ -298,6 +310,8 @@ def _summary_row(
         "unresolved_components": str(sum(1 for component in component_infos if not component["is_exact"])),
         "naive_orderings_estimate": str(naive_orderings),
         "batch_reduction_estimate": f"{naive_orderings / max(1, batch_count):.2f}",
+        "truncated": _bool(truncated),
+        "max_batch_candidates": str(max_batch_candidates),
     }
 
 
@@ -310,6 +324,7 @@ def _validate_one_batch(
     jobs: int,
     max_permutation_factorial: int,
     samples: int,
+    pass_registry: PassRegistry | None,
 ) -> dict:
     start = time.perf_counter()
     passes = _split_passes(candidate.get("canonical_order") or candidate.get("batch_passes"))
@@ -337,7 +352,7 @@ def _validate_one_batch(
     batch_dir = validation_root / _safe_name(candidate.get("batch_id", "batch"))
     batch_dir.mkdir(parents=True, exist_ok=True)
     canonical_output = batch_dir / "canonical.ll"
-    canonical_result = run_opt(opt, input_ll, passes, canonical_output, timeout)
+    canonical_result = run_opt(opt, input_ll, resolve_pipeline_sequence(passes, pass_registry), canonical_output, timeout)
     base_row["tested_orders"] = "1"
     if not canonical_result.success or not canonical_output.exists():
         base_row["validation_status"] = "failed"
@@ -359,6 +374,7 @@ def _validate_one_batch(
         batch_dir,
         timeout,
         max(1, jobs),
+        pass_registry,
     )
     failed = False
     for result in order_results:
@@ -452,16 +468,20 @@ def _run_validation_orders(
     batch_dir: Path,
     timeout: int,
     jobs: int,
+    pass_registry: PassRegistry | None,
 ) -> list[dict]:
     if not orders:
         return []
     if jobs <= 1:
-        return [_run_one_validation_order(opt, input_ll, order, batch_dir, index, timeout) for index, order in enumerate(orders)]
+        return [
+            _run_one_validation_order(opt, input_ll, order, batch_dir, index, timeout, pass_registry)
+            for index, order in enumerate(orders)
+        ]
 
     results: list[dict | None] = [None] * len(orders)
     with ThreadPoolExecutor(max_workers=jobs) as executor:
         futures = {
-            executor.submit(_run_one_validation_order, opt, input_ll, order, batch_dir, index, timeout): index
+            executor.submit(_run_one_validation_order, opt, input_ll, order, batch_dir, index, timeout, pass_registry): index
             for index, order in enumerate(orders)
         }
         for future in as_completed(futures):
@@ -476,10 +496,11 @@ def _run_one_validation_order(
     batch_dir: Path,
     index: int,
     timeout: int,
+    pass_registry: PassRegistry | None,
 ) -> dict:
     output_ll = batch_dir / f"order_{index:04d}.ll"
     output_ll.parent.mkdir(parents=True, exist_ok=True)
-    result = run_opt(opt, input_ll, order, output_ll, timeout)
+    result = run_opt(opt, input_ll, resolve_pipeline_sequence(order, pass_registry), output_ll, timeout)
     if not result.success or not output_ll.exists():
         return {"order": order, "success": False, "hash": ""}
     return {"order": order, "success": True, "hash": hash_ir(output_ll)}

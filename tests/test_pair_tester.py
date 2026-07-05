@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from phasebatch.pass_config import PassRegistry, PassSpec
 from phasebatch.pair_tester import run_pair_tests
 from phasebatch.schema import RunResult
 
@@ -75,3 +76,41 @@ class PairTesterTests(unittest.TestCase):
         self.assertEqual(len(rows), 3)
         self.assertEqual(sum(1 for row in rows if row["dynamic_relation"] == "not_tested"), 2)
         self.assertTrue(all(row["state_id"] == "S0000" for row in rows))
+
+    def test_run_pair_tests_executes_pipeline_text_but_records_names(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_ll = root / "input.ll"
+            input_ll.write_text("define i32 @f() {\n  ret i32 0\n}\n", encoding="utf-8")
+            profiles = [
+                {"program": "x", "state_id": "S0000", "depth": 0, "parent_state_id": "", "transition_pass": "", "state_hash": "s", "pass": "licm", "active": "true", "changed_functions": "f", "changed_blocks": "f::entry"},
+                {"program": "x", "state_id": "S0000", "depth": 0, "parent_state_id": "", "transition_pass": "", "state_hash": "s", "pass": "dce", "active": "true", "changed_functions": "f", "changed_blocks": "f::entry"},
+            ]
+            registry = PassRegistry.from_specs(
+                [
+                    PassSpec("licm", "function(loop(licm))", ["function(loop(licm))"], "loop", "v3", True),
+                    PassSpec("dce", "dce", ["dce"], "cleanup", "v1", True),
+                ]
+            )
+            seen_orders: list[list[str]] = []
+
+            def fake_run_opt(opt, src, passes, out, timeout):
+                seen_orders.append(passes)
+                out.write_text(input_ll.read_text(encoding="utf-8"), encoding="utf-8")
+                return RunResult([opt], 0, "", "", 1.0)
+
+            with mock.patch("phasebatch.pair_tester.run_opt", side_effect=fake_run_opt):
+                rows = run_pair_tests(
+                    input_ll,
+                    profiles,
+                    {"opt": "opt"},
+                    root,
+                    jobs=1,
+                    timeout=1,
+                    max_pairs=None,
+                    pass_registry=registry,
+                )
+
+        self.assertEqual(seen_orders, [["dce", "function(loop(licm))"], ["function(loop(licm))", "dce"]])
+        self.assertEqual(rows[0]["pass_a"], "dce")
+        self.assertEqual(rows[0]["pass_b"], "licm")

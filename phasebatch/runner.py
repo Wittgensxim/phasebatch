@@ -63,15 +63,7 @@ def run_opt(opt: str, input_ll: Path, passes: list[str], output_ll: Path, timeou
 
 def format_pass_pipeline(passes: list[str]) -> str:
     cleaned = [p for p in passes if p]
-    if not cleaned:
-        return ""
-    if all(_looks_like_simple_function_pass(pass_name) for pass_name in cleaned):
-        return f"function({','.join(cleaned)})"
     return ",".join(cleaned)
-
-
-def _looks_like_simple_function_pass(pass_name: str) -> bool:
-    return "(" not in pass_name and ")" not in pass_name and "," not in pass_name
 
 
 def _run_command(command: list[str], timeout: int, output_path: Path | None = None) -> RunResult:

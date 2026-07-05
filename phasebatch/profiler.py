@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .ir_parser import changed_regions, parse_ir_snapshot
 from .normalizer import canonical_hash
+from .pass_config import PassRegistry
 from .runner import run_opt
 from .schema import INVALID_PASS_FIELDS, PASS_PROFILE_FIELDS, VALID_PASS_FIELDS
 
@@ -17,6 +18,7 @@ def validate_passes(
     tools: dict,
     out_dir: Path,
     timeout: int,
+    pass_registry: PassRegistry | None = None,
 ) -> tuple[list[str], list[dict]]:
     validate_dir = Path(out_dir) / "artifacts" / "validate"
     validate_dir.mkdir(parents=True, exist_ok=True)
@@ -25,13 +27,17 @@ def validate_passes(
     invalid_rows: list[dict] = []
 
     for pass_name in passes:
+        pipeline = _pipeline_for(pass_name, pass_registry)
         output_ll = validate_dir / f"{_safe_name(pass_name)}.ll"
-        result = run_opt(str(tools["opt"]), input_ll, [pass_name], output_ll, timeout)
+        result = run_opt(str(tools["opt"]), input_ll, [pipeline], output_ll, timeout)
         if result.success:
             valid.append(pass_name)
             valid_rows.append(
                 {
                     "pass": pass_name,
+                    "pipeline": pipeline,
+                    "category": _category_for(pass_name, pass_registry),
+                    "stage": _stage_for(pass_name, pass_registry),
                     "valid": "true",
                     "reason": "ok",
                     "test_time_ms": f"{result.time_ms:.3f}",
@@ -41,6 +47,9 @@ def validate_passes(
             invalid_rows.append(
                 {
                     "pass": pass_name,
+                    "pipeline": pipeline,
+                    "category": _category_for(pass_name, pass_registry),
+                    "stage": _stage_for(pass_name, pass_registry),
                     "valid": "false",
                     "reason": result.failure_kind or "failed",
                     "test_time_ms": f"{result.time_ms:.3f}",
@@ -65,6 +74,7 @@ def profile_passes(
     depth: int,
     parent_state_id: str,
     transition_pass: str,
+    pass_registry: PassRegistry | None = None,
 ) -> list[dict]:
     out_dir = Path(out_dir)
     artifacts_dir = out_dir / "artifacts" / "single_pass"
@@ -81,8 +91,9 @@ def profile_passes(
     }
 
     def run_one(pass_name: str) -> dict:
+        pipeline = _pipeline_for(pass_name, pass_registry)
         output_ll = artifacts_dir / f"{_safe_name(pass_name)}.ll"
-        result = run_opt(str(tools["opt"]), input_ll, [pass_name], output_ll, timeout)
+        result = run_opt(str(tools["opt"]), input_ll, [pipeline], output_ll, timeout)
         if result.success and output_ll.exists():
             after = parse_ir_snapshot(output_ll)
             output_hash = after.module_hash
@@ -160,3 +171,15 @@ def _bool(value: bool) -> str:
 
 def _path_text(path: Path | None) -> str:
     return str(path) if path else ""
+
+
+def _pipeline_for(pass_name: str, registry: PassRegistry | None) -> str:
+    return registry.pipeline_for(pass_name) if registry else pass_name
+
+
+def _category_for(pass_name: str, registry: PassRegistry | None) -> str:
+    return registry.category_for(pass_name) if registry else "unknown"
+
+
+def _stage_for(pass_name: str, registry: PassRegistry | None) -> str:
+    return registry.stage_for(pass_name) if registry else ""

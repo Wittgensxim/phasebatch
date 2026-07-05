@@ -5,8 +5,8 @@ from collections import Counter
 from pathlib import Path
 
 from .cli import analyze_state
-from .config import load_passes
 from .normalizer import canonical_hash
+from .pass_config import load_pass_registry
 from .profiler import validate_passes
 from .runner import prepare_input_ir
 from .schema import (
@@ -46,7 +46,8 @@ def explore_states(
     states_dir.mkdir(parents=True, exist_ok=True)
     program = out_dir.name
 
-    configured_passes = load_passes(passes_path)
+    pass_registry = load_pass_registry(passes_path)
+    configured_passes = pass_registry.names()
     metadata = collect_toolchain()
     metadata.update(
         {
@@ -64,9 +65,10 @@ def explore_states(
     )
     write_metadata(out_dir, metadata)
     tools = _tool_paths(metadata)
+    tools["_pass_registry"] = pass_registry
 
     root_ir = prepare_input_ir(Path(input_path), out_dir, tools, timeout)
-    valid_passes, invalid_rows = validate_passes(root_ir, configured_passes, tools, out_dir, timeout)
+    valid_passes, invalid_rows = validate_passes(root_ir, configured_passes, tools, out_dir, timeout, pass_registry=pass_registry)
     root_hash = canonical_hash(root_ir)
 
     state_rows: list[dict] = []
@@ -79,7 +81,7 @@ def explore_states(
     next_state_number = 1
 
     root_dir = states_dir / "S0000"
-    analyze_state(
+    _analyze_state(
         root_ir,
         root_dir,
         tools,
@@ -148,7 +150,7 @@ def explore_states(
                 )
             else:
                 child_dir = states_dir / child_id
-                analyze_state(
+                _analyze_state(
                     Path(child_ir),
                     child_dir,
                     tools,
@@ -214,6 +216,17 @@ def _tool_paths(metadata: dict) -> dict[str, str]:
         for name, details in metadata.get("tools", {}).items()
         if details.get("path")
     }
+
+
+def _analyze_state(input_ll: Path, state_dir: Path, tools: dict, **kwargs) -> dict:
+    try:
+        return analyze_state(input_ll, state_dir, tools, **kwargs)
+    except TypeError as exc:
+        if "pass_registry" not in str(exc):
+            raise
+        fallback = dict(kwargs)
+        fallback.pop("pass_registry", None)
+        return analyze_state(input_ll, state_dir, tools, **fallback)
 
 
 def _active_profiles(path: Path) -> list[dict]:

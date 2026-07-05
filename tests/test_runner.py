@@ -32,3 +32,17 @@ class RunnerTests(unittest.TestCase):
         self.assertTrue(result.timed_out)
         self.assertEqual(result.failure_kind, "timeout")
         self.assertNotEqual(result.returncode, 0)
+
+    def test_run_opt_uses_pipeline_segments_verbatim(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_ll = root / "input.ll"
+            input_ll.write_text("", encoding="utf-8")
+            output_ll = root / "out.ll"
+
+            completed = subprocess.CompletedProcess(["opt"], 0, "", "")
+            with mock.patch("subprocess.run", return_value=completed) as fake_run:
+                run_opt("opt", input_ll, ["mem2reg", "function(loop(licm))", "dce"], output_ll, timeout=1)
+
+        command = fake_run.call_args.args[0]
+        self.assertIn("-passes=mem2reg,function(loop(licm)),dce", command)

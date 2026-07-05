@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest import mock
 
 from phasebatch.batcher import build_batch_family, validate_batch_candidates
+from phasebatch.pass_config import PassRegistry, PassSpec
 from phasebatch.schema import RunResult
 
 
@@ -26,6 +27,8 @@ class BatcherTests(unittest.TestCase):
         self.assertEqual(summary["commute_pairs"], "6")
         self.assertEqual(summary["conflict_pairs"], "0")
         self.assertEqual(summary["naive_orderings_estimate"], "24")
+        self.assertEqual(summary["truncated"], "false")
+        self.assertEqual(summary["max_batch_candidates"], "200")
 
     def test_fully_conflicting_three_passes_with_two_independent_passes_produces_three_batches(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -70,6 +73,20 @@ class BatcherTests(unittest.TestCase):
         self.assertEqual(batches, {"A", "B"})
         self.assertEqual(components[0]["conflict_edges"], "A--B")
         self.assertIn("Batch Summary", summary_text)
+
+    def test_no_active_passes_produces_no_empty_batch_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp)
+            _write_state(state_dir, [], {})
+
+            result = build_batch_family(state_dir)
+            candidates = _read_csv(state_dir / "batch_candidates.csv")
+            summary = _read_csv(state_dir / "batch_summary.csv")[0]
+
+        self.assertEqual(result["active_passes"], 0)
+        self.assertEqual(result["batch_candidates"], 0)
+        self.assertEqual(candidates, [])
+        self.assertEqual(summary["batch_candidates"], "0")
 
     def test_pair_relation_keys_are_unordered(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -146,6 +163,40 @@ class BatcherTests(unittest.TestCase):
         self.assertEqual(rows[0]["validation_status"], "sampled_same")
         self.assertEqual(rows[0]["tested_orders"], "4")
         self.assertEqual(rows[0]["same_hash_count"], "4")
+
+    def test_validate_batch_candidates_executes_pipeline_text_but_records_names(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp)
+            _write_input(state_dir)
+            _write_candidates(state_dir, [{"batch_id": "B0000", "batch_passes": "licm;dce", "batch_size": "2", "canonical_order": "licm;dce"}])
+            _write_summary(state_dir)
+            registry = PassRegistry.from_specs(
+                [
+                    PassSpec("licm", "function(loop(licm))", ["function(loop(licm))"], "loop", "v3", True),
+                    PassSpec("dce", "dce", ["dce"], "cleanup", "v1", True),
+                ]
+            )
+            seen_orders: list[list[str]] = []
+
+            def fake_run_opt(opt, src, passes, out, timeout):
+                seen_orders.append(passes)
+                out.write_text("define i32 @f() {\n  ret i32 0\n}\n", encoding="utf-8")
+                return RunResult([opt], 0, "", "", 1.0)
+
+            with mock.patch("phasebatch.batcher.run_opt", side_effect=fake_run_opt):
+                validate_batch_candidates(
+                    state_dir,
+                    {"opt": "opt"},
+                    timeout=1,
+                    jobs=1,
+                    max_permutation_factorial=2,
+                    pass_registry=registry,
+                )
+
+            rows = _read_csv(state_dir / "batch_validation.csv")
+
+        self.assertEqual(seen_orders[0], ["function(loop(licm))", "dce"])
+        self.assertEqual(rows[0]["canonical_order"], "licm;dce")
 
 
 def _write_state(state_dir: Path, passes: list[str], relations: dict[tuple[str, str], str]) -> None:

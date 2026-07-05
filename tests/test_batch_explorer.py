@@ -9,21 +9,28 @@ from phasebatch.schema import BATCH_VALIDATION_FIELDS, RunResult
 
 
 class BatchExplorerTests(unittest.TestCase):
-    def test_depth_one_batch_explore_caches_duplicate_batch_successors_without_validation_gate(self) -> None:
+    def test_depth_one_batch_explore_caches_duplicate_batch_successors_with_certified_batches(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             result, out_dir, fake_analyze = _run_fake_batch_explore(
                 Path(tmp),
-                validate_batches=False,
+                validate_batches=True,
+                validation_statuses={"B0000": "all_permutations_same", "B0001": "all_permutations_same"},
             )
 
             states = _read_csv(out_dir / "states.csv")
             transitions = _read_csv(out_dir / "batch_state_transitions.csv")
             skipped = _read_csv(out_dir / "skipped_batches.csv")
+            correctness = _read_csv(out_dir / "states" / "S0000" / "batch_correctness.csv")
             enable_suppress = _read_csv(out_dir / "enable_suppress.csv")
             relation_flips = _read_csv(out_dir / "relation_flip.csv")
             aggregate = _read_csv(out_dir / "aggregate_by_depth.csv")
+            aggregate_coverage = _read_csv(out_dir / "aggregate_coverage_summary.csv")
+            aggregate_overlap = _read_csv(out_dir / "aggregate_overlap_summary.csv")
             multistate_summary = (out_dir / "multistate_summary.md").read_text(encoding="utf-8")
             summary = (out_dir / "batch_explore_summary.md").read_text(encoding="utf-8")
+            root_coverage_exists = (out_dir / "states" / "S0000" / "coverage_report.csv").exists()
+            root_footprint = _read_csv(out_dir / "states" / "S0000" / "footprint_overlap.csv")
+            child_footprint_exists = (out_dir / "states" / "S0001" / "footprint_overlap.csv").exists()
 
         self.assertEqual(result["states"], 3)
         self.assertEqual(result["batch_transitions"], 2)
@@ -34,7 +41,8 @@ class BatchExplorerTests(unittest.TestCase):
         self.assertEqual([row["batch_id"] for row in transitions], ["B0000", "B0001"])
         self.assertEqual(transitions[1]["is_duplicate"], "true")
         self.assertEqual(transitions[1]["duplicate_of"], "S0001")
-        self.assertEqual(transitions[0]["validation_status"], "not_validated")
+        self.assertEqual(transitions[0]["validation_status"], "all_permutations_same")
+        self.assertEqual({row["correctness_class"] for row in correctness}, {"certified_batch"})
         self.assertEqual(skipped, [])
         self.assertEqual(len(enable_suppress), 4)
         self.assertIn("suppress", {row["relation"] for row in enable_suppress})
@@ -46,9 +54,22 @@ class BatchExplorerTests(unittest.TestCase):
         self.assertEqual(aggregate[1]["effect_changed_count"], "2")
         self.assertEqual(aggregate[1]["relation_flip_count"], "2")
         self.assertEqual(aggregate[1]["true_relation_flip_count"], "2")
+        self.assertTrue(root_coverage_exists)
+        self.assertEqual(len(root_footprint), 1)
+        self.assertTrue(child_footprint_exists)
+        self.assertEqual([row["depth"] for row in aggregate_coverage], ["0", "1"])
+        self.assertEqual(aggregate_coverage[0]["dropped_active_passes"], "0")
+        self.assertEqual(aggregate_coverage[1]["not_executed_due_to_max_depth"], "1")
+        self.assertEqual(aggregate_coverage[1]["unvalidated_covered"], "0")
+        self.assertEqual([row["depth"] for row in aggregate_overlap], ["0", "1"])
+        self.assertEqual(aggregate_overlap[0]["total_pairs"], "1")
+        self.assertEqual(aggregate_overlap[0]["unknown_overlap"], "1")
         self.assertIn("Enable/suppress counts", multistate_summary)
         self.assertIn("True relation flips among pairs active in both states", multistate_summary)
         self.assertIn("Batch Explore Summary", summary)
+        self.assertIn("Coverage Invariant", summary)
+        self.assertIn("Coarse Footprint / Overlap Diagnostics", summary)
+        self.assertIn("These coarse footprint labels are diagnostics only. They are not used as hard independence proof in this MVP.", summary)
         self.assertIn("total batch candidates: 2", summary)
         self.assertIn("executed batches: 2", summary)
         self.assertIn("skipped batches: 0", summary)
@@ -56,6 +77,9 @@ class BatchExplorerTests(unittest.TestCase):
         self.assertEqual(result["relation_flip_csv"], str(out_dir / "relation_flip.csv"))
         self.assertEqual(result["batch_state_transitions_csv"], str(out_dir / "batch_state_transitions.csv"))
         self.assertEqual(result["skipped_batches_csv"], str(out_dir / "skipped_batches.csv"))
+        self.assertEqual(result["aggregate_batch_summary_csv"], str(out_dir / "aggregate_batch_summary.csv"))
+        self.assertEqual(result["aggregate_coverage_summary_csv"], str(out_dir / "aggregate_coverage_summary.csv"))
+        self.assertEqual(result["aggregate_overlap_summary_csv"], str(out_dir / "aggregate_overlap_summary.csv"))
         self.assertEqual(result["batch_explore_summary"], str(out_dir / "batch_explore_summary.md"))
 
     def test_validation_gate_skips_mismatch_and_failed_batches(self) -> None:
@@ -80,6 +104,7 @@ class BatchExplorerTests(unittest.TestCase):
         self.assertEqual(len(skipped), 1)
         self.assertEqual(skipped[0]["batch_id"], "B0001")
         self.assertEqual(skipped[0]["validation_status"], "mismatch")
+        self.assertEqual(skipped[0]["correctness_class"], "rejected_batch")
         self.assertEqual(skipped[0]["skip_reason"], "validation_mismatch")
         self.assertIn("total batch candidates: 2", summary)
         self.assertIn("executed batches: 1", summary)
@@ -102,7 +127,27 @@ class BatchExplorerTests(unittest.TestCase):
         self.assertEqual(len(skipped), 1)
         self.assertEqual(skipped[0]["batch_id"], "B0001")
         self.assertEqual(skipped[0]["validation_status"], "sampled_same")
-        self.assertEqual(skipped[0]["skip_reason"], "sampled_batches_not_allowed")
+        self.assertEqual(skipped[0]["correctness_class"], "sampled_batch")
+        self.assertEqual(skipped[0]["skip_reason"], "sampled_not_allowed")
+
+    def test_correctness_gate_skips_failed_batches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result, out_dir, _fake_analyze = _run_fake_batch_explore(
+                Path(tmp),
+                validate_batches=True,
+                validation_statuses={"B0000": "all_permutations_same", "B0001": "failed"},
+            )
+
+            transitions = _read_csv(out_dir / "batch_state_transitions.csv")
+            skipped = _read_csv(out_dir / "skipped_batches.csv")
+
+        self.assertEqual(result["batch_transitions"], 1)
+        self.assertEqual([row["batch_id"] for row in transitions], ["B0000"])
+        self.assertEqual(len(skipped), 1)
+        self.assertEqual(skipped[0]["batch_id"], "B0001")
+        self.assertEqual(skipped[0]["validation_status"], "failed")
+        self.assertEqual(skipped[0]["correctness_class"], "failed_batch")
+        self.assertEqual(skipped[0]["skip_reason"], "validation_failed")
 
     def test_allow_sampled_batches_executes_sampled_same_batches(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -127,7 +172,8 @@ class BatchExplorerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             result, out_dir, fake_analyze = _run_fake_batch_explore(
                 Path(tmp),
-                validate_batches=False,
+                validate_batches=True,
+                validation_statuses={"B0000": "all_permutations_same", "B0001": "all_permutations_same"},
                 max_depth=2,
                 unique_outputs=True,
             )
@@ -153,11 +199,48 @@ class BatchExplorerTests(unittest.TestCase):
         self.assertIn("batch transitions: 4", summary)
         self.assertIn("total batch candidates: 4", summary)
 
+    def test_aggregate_batch_summary_groups_batch_metrics_by_depth(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result, out_dir, _fake_analyze = _run_fake_batch_explore(
+                Path(tmp),
+                validate_batches=True,
+                allow_sampled_batches=True,
+                validation_statuses={"B0000": "all_permutations_same", "B0001": "sampled_same"},
+                max_depth=2,
+                unique_outputs=True,
+            )
+
+            aggregate = _read_csv(out_dir / "aggregate_batch_summary.csv")
+            summary = (out_dir / "batch_explore_summary.md").read_text(encoding="utf-8")
+
+        self.assertEqual(result["aggregate_batch_summary_csv"], str(out_dir / "aggregate_batch_summary.csv"))
+        self.assertEqual([row["depth"] for row in aggregate], ["0", "1", "2"])
+        self.assertEqual(aggregate[0]["states"], "1")
+        self.assertEqual(aggregate[0]["avg_candidates"], "2.00")
+        self.assertEqual(aggregate[0]["avg_batch_size"], "1.00")
+        self.assertEqual(aggregate[0]["avg_reduction"], "1.00")
+        self.assertEqual(aggregate[0]["executed"], "2")
+        self.assertEqual(aggregate[0]["skipped"], "0")
+        self.assertEqual(aggregate[0]["all_permutations_same"], "1")
+        self.assertEqual(aggregate[0]["sampled_same"], "1")
+        self.assertEqual(aggregate[0]["validation_counts"], "all_permutations_same=1; sampled_same=1")
+        self.assertEqual(aggregate[1]["states"], "2")
+        self.assertEqual(aggregate[1]["avg_candidates"], "1.00")
+        self.assertEqual(aggregate[1]["executed"], "2")
+        self.assertEqual(aggregate[1]["all_permutations_same"], "2")
+        self.assertEqual(aggregate[2]["states"], "2")
+        self.assertEqual(aggregate[2]["executed"], "0")
+        self.assertEqual(aggregate[2]["validation_counts"], "")
+        self.assertIn("## By-depth Batch Summary", summary)
+        self.assertIn("| depth | states | avg candidates | avg batch size | avg reduction | executed | skipped | validation counts |", summary)
+        self.assertIn("| 0 | 1 | 2.00 | 1.00 | 1.00 | 2 | 0 | all_permutations_same=1; sampled_same=1 |", summary)
+
     def test_max_batches_per_state_caps_applied_candidates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             result, out_dir, _fake_analyze = _run_fake_batch_explore(
                 Path(tmp),
-                validate_batches=False,
+                validate_batches=True,
+                validation_statuses={"B0000": "all_permutations_same", "B0001": "all_permutations_same"},
                 unique_outputs=True,
                 max_batches_per_state=1,
             )
@@ -194,7 +277,8 @@ class BatchExplorerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             result, out_dir, _fake_analyze = _run_fake_batch_explore(
                 Path(tmp),
-                validate_batches=False,
+                validate_batches=True,
+                validation_statuses={"B0000": "all_permutations_same", "B0001": "all_permutations_same"},
                 max_depth=2,
                 unique_outputs=True,
                 max_frontier_states=1,

@@ -14,6 +14,14 @@ env/
 
 outputs/*
 !outputs/.gitkeep
+
+# Local agent/editor metadata should not be published.
+.agents/
+.codex/
+
+# Local paper copy used for reference; do not publish third-party PDFs.
+cgo.2006.15.pdf
+
 dist/
 build/
 *.egg-info/

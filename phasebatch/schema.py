@@ -107,8 +107,8 @@ PER_STATE_SUMMARY_FIELDS = [
     "total_time_ms",
 ]
 
-VALID_PASS_FIELDS = ["pass", "valid", "reason", "test_time_ms"]
-INVALID_PASS_FIELDS = ["pass", "valid", "reason", "test_time_ms"]
+VALID_PASS_FIELDS = ["pass", "pipeline", "category", "stage", "valid", "reason", "test_time_ms"]
+INVALID_PASS_FIELDS = ["pass", "pipeline", "category", "stage", "valid", "reason", "test_time_ms"]
 
 STATE_FIELDS = [
     "program",
@@ -201,6 +201,72 @@ AGGREGATE_BY_DEPTH_FIELDS = [
     "total_time_ms",
 ]
 
+AGGREGATE_BATCH_SUMMARY_FIELDS = [
+    "program",
+    "depth",
+    "states",
+    "avg_candidates",
+    "avg_batch_size",
+    "avg_reduction",
+    "executed",
+    "skipped",
+    "all_permutations_same",
+    "sampled_same",
+    "not_validated",
+    "mismatch",
+    "failed",
+    "validation_counts",
+]
+
+AGGREGATE_COVERAGE_SUMMARY_FIELDS = [
+    "program",
+    "depth",
+    "states",
+    "active_passes",
+    "certified_covered",
+    "heuristic_covered",
+    "unresolved_conflict",
+    "validation_rejected",
+    "unvalidated_covered",
+    "failed_or_unknown",
+    "not_executed_due_to_max_depth",
+    "dropped_active_passes",
+]
+
+FOOTPRINT_OVERLAP_FIELDS = [
+    "program",
+    "state_id",
+    "state_hash",
+    "pass_a",
+    "pass_b",
+    "pass_a_changed_functions",
+    "pass_b_changed_functions",
+    "pass_a_changed_blocks",
+    "pass_b_changed_blocks",
+    "write_func_overlap",
+    "write_block_overlap",
+    "same_function",
+    "same_block",
+    "overlap_kind",
+    "dynamic_relation",
+    "final_relation",
+]
+
+AGGREGATE_OVERLAP_SUMMARY_FIELDS = [
+    "program",
+    "depth",
+    "states",
+    "total_pairs",
+    "disjoint_write",
+    "same_function_overlap",
+    "same_block_overlap",
+    "possible_ww_overlap",
+    "unknown_overlap",
+    "disjoint_and_commute",
+    "overlap_and_commute",
+    "overlap_and_order_sensitive",
+]
+
 BATCH_COMPONENT_FIELDS = [
     "program",
     "state_id",
@@ -244,6 +310,8 @@ BATCH_SUMMARY_FIELDS = [
     "unresolved_components",
     "naive_orderings_estimate",
     "batch_reduction_estimate",
+    "truncated",
+    "max_batch_candidates",
 ]
 
 BATCH_VALIDATION_FIELDS = [
@@ -263,6 +331,20 @@ BATCH_VALIDATION_FIELDS = [
     "time_ms",
 ]
 
+BATCH_CORRECTNESS_FIELDS = [
+    "program",
+    "state_id",
+    "state_hash",
+    "batch_id",
+    "batch_passes",
+    "batch_size",
+    "validation_status",
+    "correctness_class",
+    "can_hard_fold",
+    "can_execute",
+    "reason",
+]
+
 BATCH_STATE_TRANSITION_FIELDS = [
     "program",
     "parent_state_id",
@@ -280,11 +362,361 @@ BATCH_STATE_TRANSITION_FIELDS = [
 SKIPPED_BATCH_FIELDS = [
     "program",
     "parent_state_id",
+    "state_hash",
     "batch_id",
     "batch_passes",
     "batch_size",
     "validation_status",
+    "correctness_class",
     "skip_reason",
+]
+
+OBJECTIVE_EVAL_FIELDS = [
+    "program",
+    "objective",
+    "parent_state_id",
+    "child_state_id",
+    "batch_id",
+    "batch_passes",
+    "batch_size",
+    "validation_status",
+    "parent_hash",
+    "child_hash",
+    "parent_inst_count",
+    "child_inst_count",
+    "inst_delta",
+    "inst_reduction_pct",
+    "is_duplicate",
+    "duplicate_of",
+]
+
+OBJECTIVE_SIGNAL_FIELDS = [
+    "program",
+    "parent_state_id",
+    "child_state_id",
+    "transition_kind",
+    "batch_id",
+    "batch_passes",
+    "batch_size",
+    "validation_status",
+    "correctness_class",
+    "parent_ir_path",
+    "child_ir_path",
+    "ir_inst_before",
+    "ir_inst_after",
+    "ir_inst_delta",
+    "ir_inst_reduction_pct",
+    "objective_kind",
+    "objective_note",
+]
+
+BASELINE_RESULT_FIELDS = [
+    "program",
+    "method",
+    "status",
+    "final_ir_path",
+    "final_ir_hash",
+    "final_ir_inst_count",
+    "root_ir_inst_count",
+    "ir_inst_delta",
+    "ir_inst_reduction_pct",
+    "pass_sequence",
+    "final_sequence_length",
+    "states_evaluated",
+    "opt_runs",
+    "time_ms",
+    "optimizer_total_time_ms",
+    "analysis_time_ms",
+    "profiling_time_ms",
+    "pair_testing_time_ms",
+    "batch_validation_time_ms",
+    "batch_apply_time_ms",
+    "total_opt_invocations",
+    "stop_reason",
+    "error_message",
+]
+
+RANDOM_BASELINE_TRIAL_FIELDS = [
+    "trial",
+    "status",
+    "final_ir_path",
+    "final_ir_hash",
+    "final_ir_inst_count",
+    "root_ir_inst_count",
+    "ir_inst_delta",
+    "ir_inst_reduction_pct",
+    "pass_sequence",
+    "final_sequence_length",
+    "states_evaluated",
+    "opt_runs",
+    "stop_reason",
+    "time_ms",
+    "error_message",
+]
+
+ROUND_SENSITIVITY_FIELDS = [
+    "max_rounds",
+    "run_dir",
+    "status",
+    "states_reached",
+    "transitions",
+    "final_inst",
+    "pipeline_len",
+    "exact_status",
+    "selected_final_state",
+    "selected_leaf_reason",
+    "truncated",
+    "selected_final_state_is_terminal",
+    "selected_final_state_stop_reason",
+    "selected_final_state_truncated",
+    "remaining_active_pass_count",
+    "remaining_active_passes",
+    "remaining_executable_batch_count",
+    "remaining_executable_batches",
+    "optimizer_total_time_ms",
+    "optimized_pipeline",
+    "error_message",
+]
+
+REDUCTION_BY_STATE_FIELDS = [
+    "program",
+    "state_id",
+    "depth",
+    "state_hash",
+    "active_passes",
+    "tested_pairs",
+    "commute_pairs",
+    "order_sensitive_pairs",
+    "unknown_pairs",
+    "naive_orderings_log10",
+    "batch_candidates",
+    "certified_batches",
+    "executable_batches",
+    "sampled_batches",
+    "rejected_batches",
+    "failed_batches",
+    "unvalidated_batches",
+    "skipped_batches",
+    "dropped_active_passes",
+    "local_reduction_log10",
+    "local_reduction_ratio",
+    "no_executable_batches",
+    "terminal_due_max_depth",
+    "selected_on_final_path",
+]
+
+REDUCTION_SUMMARY_FIELDS = [
+    "program",
+    "total_states",
+    "max_depth",
+    "total_active_passes",
+    "total_tested_pairs",
+    "total_commute_pairs",
+    "total_order_sensitive_pairs",
+    "total_batch_candidates",
+    "total_certified_batches",
+    "total_executable_batches",
+    "total_executed_transitions",
+    "total_skipped_batches",
+    "total_dropped_active_passes",
+    "avg_active_passes",
+    "avg_batch_candidates",
+    "avg_executable_batches",
+    "avg_local_reduction_log10",
+    "max_local_reduction_log10",
+    "selected_path_steps",
+    "selected_path_pass_invocations",
+    "final_pipeline_length",
+]
+
+SELECTED_BATCH_CERTIFICATE_FIELDS = [
+    "step",
+    "parent_state_id",
+    "batch_id",
+    "batch_passes",
+    "canonical_order",
+    "validation_status",
+    "correctness_class",
+    "can_hard_fold",
+    "can_execute",
+    "tested_orders",
+    "same_hash_count",
+    "different_hash_count",
+    "canonical_hash",
+    "first_mismatch_order",
+    "first_mismatch_hash",
+    "evidence_strength",
+    "evidence_note",
+]
+
+EXECUTED_BATCH_CERTIFICATE_FIELDS = [
+    "parent_state_id",
+    "child_state_id",
+    "batch_id",
+    "batch_passes",
+    "validation_status",
+    "correctness_class",
+    "can_hard_fold",
+    "can_execute",
+    "is_duplicate_transition",
+    "duplicate_of",
+    "evidence_strength",
+    "evidence_note",
+]
+
+EVIDENCE_PACK_FIELDS = [
+    "program",
+    "selected_path_batches",
+    "selected_strong_certificates",
+    "selected_weak_certificates",
+    "selected_rejected",
+    "executed_batches",
+    "executed_strong_certificates",
+    "executed_weak_certificates",
+    "executed_rejected",
+    "replay_status",
+    "replay_hashes_match",
+    "dropped_active_passes",
+]
+
+PIPELINE_COMPARISON_FIELDS = [
+    "method",
+    "status",
+    "final_ir_inst_count",
+    "ir_inst_delta",
+    "ir_inst_reduction_pct",
+    "pass_sequence",
+    "final_sequence_length",
+    "states_evaluated",
+    "opt_runs",
+]
+
+PREFIX_EVAL_FIELDS = [
+    "method",
+    "prefix_len",
+    "pass_prefix",
+    "ir_inst_count",
+    "inst_delta_from_root",
+    "status",
+    "error_message",
+]
+
+MISSED_PASS_DIAGNOSTIC_FIELDS = [
+    "greedy_step",
+    "greedy_pass",
+    "appears_in_batch_pipeline",
+    "appears_in_any_root_batch_candidate",
+    "appears_in_any_certified_root_batch",
+    "appears_in_any_sampled_root_batch",
+    "appears_in_any_rejected_root_batch",
+    "appears_in_any_order_sensitive_pair",
+    "diagnostic_reason",
+]
+
+COMPONENT_EDGE_FIELDS = [
+    "program",
+    "state_id",
+    "depth",
+    "pass_a",
+    "pass_b",
+    "relation",
+    "edge_kind",
+    "same_hash",
+    "validation_status",
+    "component_id",
+]
+
+COMPONENT_SUMMARY_FIELDS = [
+    "program",
+    "state_id",
+    "depth",
+    "component_id",
+    "component_size",
+    "component_passes",
+    "conflict_edges",
+    "commute_pairs_inside_component",
+    "order_sensitive_edges",
+    "unknown_edges",
+    "is_singleton",
+    "is_exact",
+    "num_local_alternatives",
+    "unresolved_reason",
+    "batch_candidates_contributed",
+]
+
+COMPONENT_PROGRAM_SUMMARY_FIELDS = [
+    "program",
+    "states",
+    "total_components",
+    "singleton_components",
+    "non_singleton_components",
+    "avg_component_size",
+    "max_component_size",
+    "avg_conflict_edges",
+    "total_order_sensitive_edges",
+    "total_unknown_edges",
+    "total_batch_candidates",
+    "avg_batch_candidates_per_state",
+    "avg_max_component_size_per_state",
+]
+
+FINAL_SUMMARY_INDEX_FIELDS = [
+    "program",
+    "final_state",
+    "root_ir_inst_count",
+    "final_ir_inst_count",
+    "reduction_pct",
+    "path_steps",
+    "pass_invocations",
+    "optimized_pipeline",
+    "best_baseline_method",
+    "best_baseline_inst_count",
+    "optimized_beats_greedy",
+    "optimized_beats_random",
+    "optimized_beats_config_order",
+    "replay_status",
+    "replay_hashes_match",
+]
+
+PIPELINE_REPLAY_FIELDS = [
+    "program",
+    "root_ir_path",
+    "optimized_pipeline",
+    "replay_output_path",
+    "final_ir_path",
+    "replay_hash",
+    "final_hash",
+    "hashes_match",
+    "replay_status",
+    "error_message",
+    "time_ms",
+]
+
+COVERAGE_REPORT_FIELDS = [
+    "program",
+    "state_id",
+    "state_hash",
+    "active_pass",
+    "coverage_status",
+    "covered_by_batch_ids",
+    "component_ids",
+    "correctness_classes",
+    "reason",
+]
+
+COVERAGE_SUMMARY_FIELDS = [
+    "program",
+    "state_id",
+    "state_hash",
+    "active_passes",
+    "certified_covered",
+    "heuristic_covered",
+    "unresolved_conflict",
+    "validation_rejected",
+    "unvalidated_covered",
+    "failed_or_unknown",
+    "not_executed_due_to_max_depth",
+    "dropped_active_passes",
 ]
 
 

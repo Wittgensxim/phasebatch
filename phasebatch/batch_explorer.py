@@ -4,25 +4,33 @@ import shutil
 from collections import Counter
 from pathlib import Path
 
+from .batch_correctness import classify_batch_correctness, skip_reason_for_correctness
 from .batcher import build_batch_family, validate_batch_candidates
 from .cli import analyze_state
-from .config import load_passes
+from .coverage import build_coverage_report
 from .explorer import (
     _aggregate_by_depth,
     _bool,
     _duplicate_state_row,
     _enable_suppress_rows,
+    _first_row,
+    _format_float,
     _read_csv,
     _relation_flip_rows,
     _state_row_from_summary,
     _tool_paths,
+    _to_float,
     _write_csv,
     _write_multistate_summary,
 )
+from .footprint import build_footprint_overlap, write_aggregate_overlap_summary
 from .normalizer import canonical_hash
+from .pass_config import PassRegistry, load_pass_registry, resolve_pipeline_sequence
 from .profiler import validate_passes
 from .runner import prepare_input_ir, run_opt
 from .schema import (
+    AGGREGATE_BATCH_SUMMARY_FIELDS,
+    AGGREGATE_COVERAGE_SUMMARY_FIELDS,
     AGGREGATE_BY_DEPTH_FIELDS,
     BATCH_STATE_TRANSITION_FIELDS,
     ENABLE_SUPPRESS_FIELDS,
@@ -56,7 +64,8 @@ def explore_batches(
     states_dir.mkdir(parents=True, exist_ok=True)
     program = out_dir.name
 
-    configured_passes = load_passes(passes_path)
+    pass_registry = load_pass_registry(passes_path)
+    configured_passes = pass_registry.names()
     metadata = collect_toolchain()
     metadata.update(
         {
@@ -80,9 +89,10 @@ def explore_batches(
     )
     write_metadata(out_dir, metadata)
     tools = _tool_paths(metadata)
+    tools["_pass_registry"] = pass_registry
 
     prepared_ir = prepare_input_ir(Path(input_path), out_dir, tools, timeout)
-    valid_passes, invalid_rows = validate_passes(prepared_ir, configured_passes, tools, out_dir, timeout)
+    valid_passes, invalid_rows = validate_passes(prepared_ir, configured_passes, tools, out_dir, timeout, pass_registry=pass_registry)
 
     root_dir = states_dir / "S0000"
     root_dir.mkdir(parents=True, exist_ok=True)
@@ -90,7 +100,7 @@ def explore_batches(
     shutil.copyfile(prepared_ir, root_ir)
     root_hash = canonical_hash(root_ir)
 
-    analyze_state(
+    _analyze_state(
         root_ir,
         root_dir,
         tools,
@@ -148,10 +158,17 @@ def explore_batches(
                 root_batch_result = parent_batch_result
             if validate_batches:
                 validate_batch_candidates(parent_dir, tools, timeout=timeout, jobs=jobs)
+            correctness_rows = classify_batch_correctness(
+                parent_dir,
+                allow_sampled_batches=allow_sampled_batches,
+            )
+            build_footprint_overlap(parent_dir)
+            build_coverage_report(parent_dir)
 
             candidate_rows = _read_csv(parent_dir / "batch_candidates.csv")
             total_batch_candidates += len(candidate_rows)
             validation_map = _validation_status_map(parent_dir / "batch_validation.csv")
+            correctness_map = _correctness_map(correctness_rows)
             selected_candidates = _select_candidate_batches(
                 candidate_rows,
                 validation_map=validation_map,
@@ -181,7 +198,7 @@ def explore_batches(
                     depth=depth,
                     validate_batches=validate_batches,
                     allow_sampled_batches=allow_sampled_batches,
-                    validation_map=validation_map,
+                    correctness_map=correctness_map,
                     hash_to_state_id=hash_to_state_id,
                     canonical_rows_by_id=canonical_rows_by_id,
                     state_rows=state_rows,
@@ -193,6 +210,7 @@ def explore_batches(
                     next_state_number=next_state_number,
                     max_component_size=max_component_size,
                     max_batch_candidates=max_batch_candidates,
+                    max_depth=max_depth,
                 )
                 next_state_number = result["next_state_number"]
                 if result["frontier_row"]:
@@ -212,6 +230,9 @@ def explore_batches(
         )
         if validate_batches:
             validate_batch_candidates(root_dir, tools, timeout=timeout, jobs=jobs)
+        classify_batch_correctness(root_dir, allow_sampled_batches=allow_sampled_batches)
+        build_footprint_overlap(root_dir)
+        build_coverage_report(root_dir, terminal_not_validated=max_depth <= 0)
         total_batch_candidates = int(root_batch_result.get("batch_candidates", 0) or 0)
         selected_batch_candidates = 0
 
@@ -223,6 +244,12 @@ def explore_batches(
     _write_csv(out_dir / "relation_flip.csv", RELATION_FLIP_FIELDS, relation_flip_rows)
     aggregate_rows = _aggregate_by_depth(out_dir, program)
     _write_csv(out_dir / "aggregate_by_depth.csv", AGGREGATE_BY_DEPTH_FIELDS, aggregate_rows)
+    aggregate_batch_rows = _aggregate_batch_summary(out_dir, program)
+    _write_csv(out_dir / "aggregate_batch_summary.csv", AGGREGATE_BATCH_SUMMARY_FIELDS, aggregate_batch_rows)
+    aggregate_coverage_rows = _aggregate_coverage_summary(out_dir, program)
+    _write_csv(out_dir / "aggregate_coverage_summary.csv", AGGREGATE_COVERAGE_SUMMARY_FIELDS, aggregate_coverage_rows)
+    aggregate_overlap_rows = write_aggregate_overlap_summary(out_dir, program)
+    correctness_rows = _batch_correctness_rows_from_states(state_rows)
     _write_multistate_summary(out_dir / "multistate_summary.md", out_dir, aggregate_rows)
     _write_batch_explore_summary(
         out_dir / "batch_explore_summary.md",
@@ -234,6 +261,10 @@ def explore_batches(
         selected_batch_candidates=selected_batch_candidates,
         validate_batches=validate_batches,
         allow_sampled_batches=allow_sampled_batches,
+        aggregate_batch_rows=aggregate_batch_rows,
+        correctness_rows=correctness_rows,
+        aggregate_coverage_rows=aggregate_coverage_rows,
+        aggregate_overlap_rows=aggregate_overlap_rows,
     )
     return {
         "program": program,
@@ -246,6 +277,9 @@ def explore_batches(
         "enable_suppress_csv": str(out_dir / "enable_suppress.csv"),
         "relation_flip_csv": str(out_dir / "relation_flip.csv"),
         "aggregate_by_depth_csv": str(out_dir / "aggregate_by_depth.csv"),
+        "aggregate_batch_summary_csv": str(out_dir / "aggregate_batch_summary.csv"),
+        "aggregate_coverage_summary_csv": str(out_dir / "aggregate_coverage_summary.csv"),
+        "aggregate_overlap_summary_csv": str(out_dir / "aggregate_overlap_summary.csv"),
         "multistate_summary": str(out_dir / "multistate_summary.md"),
         "batch_explore_summary": str(out_dir / "batch_explore_summary.md"),
     }
@@ -269,7 +303,7 @@ def _apply_batch_candidate(
     depth: int,
     validate_batches: bool,
     allow_sampled_batches: bool,
-    validation_map: dict[str, str],
+    correctness_map: dict[str, dict],
     hash_to_state_id: dict[str, str],
     canonical_rows_by_id: dict[str, dict],
     state_rows: list[dict],
@@ -281,16 +315,21 @@ def _apply_batch_candidate(
     next_state_number: int,
     max_component_size: int,
     max_batch_candidates: int,
+    max_depth: int,
 ) -> dict:
-    validation_status = validation_map.get(candidate.get("batch_id", ""), "not_validated")
-    skip_reason = _validation_skip_reason(
-        validation_status,
-        validate_batches=validate_batches,
-        allow_sampled_batches=allow_sampled_batches,
+    correctness = correctness_map.get(
+        candidate.get("batch_id", ""),
+        {
+            "validation_status": "not_validated",
+            "correctness_class": "unvalidated_batch",
+            "can_execute": "false",
+        },
     )
+    validation_status = correctness.get("validation_status", "not_validated")
+    skip_reason = skip_reason_for_correctness(correctness)
     if skip_reason:
         skipped_batch_rows.append(
-            _skipped_batch_row(program, parent["state_id"], candidate, validation_status, skip_reason)
+            _skipped_batch_row(program, parent, candidate, correctness, skip_reason)
         )
         return {"next_state_number": next_state_number, "frontier_row": None}
 
@@ -300,7 +339,14 @@ def _apply_batch_candidate(
 
     child_ir = parent_dir / "artifacts" / "batch_successors" / f"{candidate.get('batch_id', 'batch')}.ll"
     child_ir.parent.mkdir(parents=True, exist_ok=True)
-    result = run_opt(tools["opt"], parent_input, order, child_ir, timeout)
+    pass_registry = tools.get("_pass_registry")
+    result = run_opt(
+        tools["opt"],
+        parent_input,
+        resolve_pipeline_sequence(order, pass_registry if isinstance(pass_registry, PassRegistry) else None),
+        child_ir,
+        timeout,
+    )
     if not result.success or not child_ir.exists():
         return {"next_state_number": next_state_number, "frontier_row": None}
 
@@ -325,7 +371,7 @@ def _apply_batch_candidate(
     else:
         child_dir = states_dir / child_id
         child_input = _materialize_state_input(child_dir, child_ir)
-        analyze_state(
+        _analyze_state(
             child_input,
             child_dir,
             tools,
@@ -346,6 +392,9 @@ def _apply_batch_candidate(
             max_component_size=max_component_size,
             max_batch_candidates=max_batch_candidates,
         )
+        classify_batch_correctness(child_dir, allow_sampled_batches=allow_sampled_batches)
+        build_footprint_overlap(child_dir)
+        build_coverage_report(child_dir, terminal_not_validated=depth >= max_depth)
         child_row = _state_row_from_summary(
             child_dir,
             program=program,
@@ -379,6 +428,17 @@ def _state_input_path(state: dict) -> Path:
     if direct.exists():
         return direct
     return Path(state.get("ir_path", ""))
+
+
+def _analyze_state(input_ll: Path, state_dir: Path, tools: dict, **kwargs) -> dict:
+    try:
+        return analyze_state(input_ll, state_dir, tools, **kwargs)
+    except TypeError as exc:
+        if "pass_registry" not in str(exc):
+            raise
+        fallback = dict(kwargs)
+        fallback.pop("pass_registry", None)
+        return analyze_state(input_ll, state_dir, tools, **fallback)
 
 
 def _materialize_state_input(state_dir: Path, source_ir: Path) -> Path:
@@ -462,6 +522,162 @@ def _validation_status_map(path: Path) -> dict[str, str]:
     return {row.get("batch_id", ""): row.get("validation_status", "") for row in _read_csv(path) if row.get("batch_id")}
 
 
+def _correctness_map(rows: list[dict]) -> dict[str, dict]:
+    return {row.get("batch_id", ""): row for row in rows if row.get("batch_id")}
+
+
+_BATCH_VALIDATION_STATUSES = [
+    "all_permutations_same",
+    "sampled_same",
+    "not_validated",
+    "mismatch",
+    "failed",
+]
+
+
+def _aggregate_batch_summary(out_dir: Path, program: str) -> list[dict]:
+    state_rows = _read_csv(out_dir / "states.csv")
+    transition_rows = _read_csv(out_dir / "batch_state_transitions.csv")
+    skipped_rows = _read_csv(out_dir / "skipped_batches.csv")
+    state_depths = {row.get("state_id", ""): _to_int(row.get("depth")) for row in state_rows}
+    buckets: dict[int, dict] = {}
+
+    for row in transition_rows:
+        _batch_bucket(buckets, state_depths.get(row.get("parent_state_id", ""), 0))["executed"] += 1
+    for row in skipped_rows:
+        _batch_bucket(buckets, state_depths.get(row.get("parent_state_id", ""), 0))["skipped"] += 1
+
+    seen_dirs: set[str] = set()
+    for state in state_rows:
+        if str(state.get("is_duplicate", "")).lower() == "true":
+            continue
+        state_dir_value = state.get("state_dir", "")
+        if not state_dir_value:
+            continue
+        state_dir = Path(state_dir_value)
+        state_dir_key = str(state_dir.resolve())
+        if state_dir_key in seen_dirs:
+            continue
+        seen_dirs.add(state_dir_key)
+
+        batch_summary = _first_row(state_dir / "batch_summary.csv")
+        if not batch_summary:
+            continue
+
+        depth = _to_int(state.get("depth"))
+        bucket = _batch_bucket(buckets, depth)
+        bucket["states"] += 1
+        bucket["candidate_counts"].append(_to_float(batch_summary.get("batch_candidates")))
+        bucket["reductions"].append(_to_float(batch_summary.get("batch_reduction_estimate")))
+        bucket["batch_sizes"].extend(_to_float(row.get("batch_size")) for row in _read_csv(state_dir / "batch_candidates.csv"))
+        for validation in _read_csv(state_dir / "batch_validation.csv"):
+            status = validation.get("validation_status") or "not_validated"
+            bucket["validation_counts"][status] += 1
+
+    aggregate_rows: list[dict] = []
+    for depth in sorted(buckets):
+        bucket = buckets[depth]
+        validation_counts = bucket["validation_counts"]
+        aggregate_rows.append(
+            {
+                "program": program,
+                "depth": str(depth),
+                "states": str(bucket["states"]),
+                "avg_candidates": _format_float(_avg_batch_metric(bucket["candidate_counts"])),
+                "avg_batch_size": _format_float(_avg_batch_metric(bucket["batch_sizes"])),
+                "avg_reduction": _format_float(_avg_batch_metric(bucket["reductions"])),
+                "executed": str(bucket["executed"]),
+                "skipped": str(bucket["skipped"]),
+                "all_permutations_same": str(validation_counts.get("all_permutations_same", 0)),
+                "sampled_same": str(validation_counts.get("sampled_same", 0)),
+                "not_validated": str(validation_counts.get("not_validated", 0)),
+                "mismatch": str(validation_counts.get("mismatch", 0)),
+                "failed": str(validation_counts.get("failed", 0)),
+                "validation_counts": _format_validation_counts(validation_counts),
+            }
+        )
+    return aggregate_rows
+
+
+def _aggregate_coverage_summary(out_dir: Path, program: str) -> list[dict]:
+    state_rows = _read_csv(out_dir / "states.csv")
+    buckets: dict[int, dict] = {}
+    seen_dirs: set[str] = set()
+    for state in state_rows:
+        if str(state.get("is_duplicate", "")).lower() == "true":
+            continue
+        state_dir_value = state.get("state_dir", "")
+        if not state_dir_value:
+            continue
+        state_dir = Path(state_dir_value)
+        state_dir_key = str(state_dir.resolve())
+        if state_dir_key in seen_dirs:
+            continue
+        seen_dirs.add(state_dir_key)
+        summary = _first_row(state_dir / "coverage_summary.csv")
+        if not summary:
+            continue
+        bucket = _coverage_bucket(buckets, _to_int(state.get("depth")))
+        bucket["states"] += 1
+        for field in _COVERAGE_COUNT_FIELDS:
+            bucket[field] += _to_int(summary.get(field))
+
+    rows = []
+    for depth in sorted(buckets):
+        bucket = buckets[depth]
+        row = {"program": program, "depth": str(depth), "states": str(bucket["states"])}
+        for field in _COVERAGE_COUNT_FIELDS:
+            row[field] = str(bucket[field])
+        rows.append(row)
+    return rows
+
+
+_COVERAGE_COUNT_FIELDS = [
+    "active_passes",
+    "certified_covered",
+    "heuristic_covered",
+    "unresolved_conflict",
+    "validation_rejected",
+    "unvalidated_covered",
+    "failed_or_unknown",
+    "not_executed_due_to_max_depth",
+    "dropped_active_passes",
+]
+
+
+def _coverage_bucket(buckets: dict[int, dict], depth: int) -> dict:
+    if depth not in buckets:
+        buckets[depth] = {"states": 0, **{field: 0 for field in _COVERAGE_COUNT_FIELDS}}
+    return buckets[depth]
+
+
+def _batch_bucket(buckets: dict[int, dict], depth: int) -> dict:
+    if depth not in buckets:
+        buckets[depth] = {
+            "states": 0,
+            "candidate_counts": [],
+            "batch_sizes": [],
+            "reductions": [],
+            "executed": 0,
+            "skipped": 0,
+            "validation_counts": Counter(),
+        }
+    return buckets[depth]
+
+
+def _avg_batch_metric(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    return sum(values) / len(values)
+
+
+def _format_validation_counts(counts: Counter) -> str:
+    ordered = [(status, counts.get(status, 0)) for status in _BATCH_VALIDATION_STATUSES]
+    extras = sorted((status, count) for status, count in counts.items() if status not in _BATCH_VALIDATION_STATUSES)
+    parts = [f"{status}={count}" for status, count in ordered + extras if count]
+    return "; ".join(parts)
+
+
 def _validation_skip_reason(
     validation_status: str,
     *,
@@ -493,18 +709,20 @@ def _split_order(value: str | None) -> list[str]:
 
 def _skipped_batch_row(
     program: str,
-    parent_state_id: str,
+    parent: dict,
     candidate: dict,
-    validation_status: str,
+    correctness: dict,
     skip_reason: str,
 ) -> dict:
     return {
         "program": program,
-        "parent_state_id": parent_state_id,
+        "parent_state_id": parent["state_id"],
+        "state_hash": parent.get("state_hash", ""),
         "batch_id": candidate.get("batch_id", ""),
         "batch_passes": candidate.get("batch_passes", ""),
         "batch_size": candidate.get("batch_size", ""),
-        "validation_status": validation_status or "not_validated",
+        "validation_status": correctness.get("validation_status", "") or "not_validated",
+        "correctness_class": correctness.get("correctness_class", ""),
         "skip_reason": skip_reason,
     }
 
@@ -571,6 +789,10 @@ def _write_batch_explore_summary(
     selected_batch_candidates: int,
     validate_batches: bool,
     allow_sampled_batches: bool,
+    aggregate_batch_rows: list[dict],
+    correctness_rows: list[dict],
+    aggregate_coverage_rows: list[dict],
+    aggregate_overlap_rows: list[dict],
 ) -> None:
     duplicate_states = sum(1 for row in states if row.get("is_duplicate") == "true")
     validation_counts = Counter(row.get("validation_status", "") for row in transitions if row.get("validation_status"))
@@ -597,6 +819,14 @@ def _write_batch_explore_summary(
     lines.extend(_markdown_table(["validation_status", "count"], [[key, str(count)] for key, count in sorted(validation_counts.items())]))
     lines.extend(["", "## Skipped By Validation Status", ""])
     lines.extend(_markdown_table(["validation_status", "count"], [[key, str(count)] for key, count in sorted(skipped_counts.items())]))
+    lines.extend(["", "## Batch Correctness", ""])
+    lines.extend(_batch_correctness_summary(correctness_rows, len(skipped_batches)))
+    lines.extend(["", "## Coverage Invariant", ""])
+    lines.extend(_coverage_invariant_summary(aggregate_coverage_rows))
+    lines.extend(["", "## Coarse Footprint / Overlap Diagnostics", ""])
+    lines.extend(_overlap_diagnostics_summary(aggregate_overlap_rows))
+    lines.extend(["", "## By-depth Batch Summary", ""])
+    lines.extend(_batch_depth_table(aggregate_batch_rows))
     lines.extend(["", "## Batch Transitions", ""])
     lines.extend(
         _markdown_table(
@@ -614,6 +844,143 @@ def _write_batch_explore_summary(
         )
     )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _batch_depth_table(aggregate_batch_rows: list[dict]) -> list[str]:
+    return _markdown_table(
+        ["depth", "states", "avg candidates", "avg batch size", "avg reduction", "executed", "skipped", "validation counts"],
+        [
+            [
+                row.get("depth", ""),
+                row.get("states", ""),
+                row.get("avg_candidates", ""),
+                row.get("avg_batch_size", ""),
+                row.get("avg_reduction", ""),
+                row.get("executed", ""),
+                row.get("skipped", ""),
+                row.get("validation_counts", ""),
+            ]
+            for row in aggregate_batch_rows
+        ],
+    )
+
+
+def _batch_correctness_rows_from_states(state_rows: list[dict]) -> list[dict]:
+    rows = []
+    seen_dirs: set[str] = set()
+    for state in state_rows:
+        if str(state.get("is_duplicate", "")).lower() == "true":
+            continue
+        state_dir_value = state.get("state_dir", "")
+        if not state_dir_value:
+            continue
+        state_dir = Path(state_dir_value)
+        state_dir_key = str(state_dir.resolve())
+        if state_dir_key in seen_dirs:
+            continue
+        seen_dirs.add(state_dir_key)
+        rows.extend(_read_csv(state_dir / "batch_correctness.csv"))
+    return rows
+
+
+def _batch_correctness_summary(correctness_rows: list[dict], skipped_count: int) -> list[str]:
+    class_counts = Counter(row.get("correctness_class", "") for row in correctness_rows)
+    executable_count = sum(1 for row in correctness_rows if row.get("can_execute") == "true")
+    lines = [
+        f"- total batch candidates: {len(correctness_rows)}",
+        f"- certified_batch count: {class_counts.get('certified_batch', 0)}",
+        f"- sampled_batch count: {class_counts.get('sampled_batch', 0)}",
+        f"- rejected_batch count: {class_counts.get('rejected_batch', 0)}",
+        f"- failed_batch count: {class_counts.get('failed_batch', 0)}",
+        f"- unvalidated_batch count: {class_counts.get('unvalidated_batch', 0)}",
+        f"- executable batch count: {executable_count}",
+        f"- skipped batch count: {skipped_count}",
+        "",
+    ]
+    table_rows = [[key or "missing", str(count)] for key, count in sorted(class_counts.items())]
+    lines.extend(_markdown_table(["correctness_class", "count"], table_rows))
+    return lines
+
+
+def _coverage_invariant_summary(aggregate_coverage_rows: list[dict]) -> list[str]:
+    totals = {field: sum(_to_int(row.get(field)) for row in aggregate_coverage_rows) for field in _COVERAGE_COUNT_FIELDS}
+    lines = [
+        f"- total active passes: {totals['active_passes']}",
+        f"- certified covered: {totals['certified_covered']}",
+        f"- heuristic covered: {totals['heuristic_covered']}",
+        f"- unresolved conflict: {totals['unresolved_conflict']}",
+        f"- rejected: {totals['validation_rejected']}",
+        f"- unknown/unvalidated: {totals['unvalidated_covered'] + totals['failed_or_unknown']}",
+        f"- not executed due max depth: {totals['not_executed_due_to_max_depth']}",
+        f"- dropped: {totals['dropped_active_passes']}",
+    ]
+    if totals["dropped_active_passes"] > 0:
+        lines.append("- WARNING: at least one active pass was dropped from batch coverage.")
+    lines.extend(["", *_markdown_table(
+        [
+            "depth",
+            "states",
+            "active",
+            "certified",
+            "heuristic",
+            "unresolved",
+            "rejected",
+            "unknown/unvalidated",
+            "not executed due max depth",
+            "dropped",
+        ],
+        [
+            [
+                row.get("depth", ""),
+                row.get("states", ""),
+                row.get("active_passes", ""),
+                row.get("certified_covered", ""),
+                row.get("heuristic_covered", ""),
+                row.get("unresolved_conflict", ""),
+                row.get("validation_rejected", ""),
+                str(_to_int(row.get("unvalidated_covered")) + _to_int(row.get("failed_or_unknown"))),
+                row.get("not_executed_due_to_max_depth", ""),
+                row.get("dropped_active_passes", ""),
+            ]
+            for row in aggregate_coverage_rows
+        ],
+    )])
+    return lines
+
+
+def _overlap_diagnostics_summary(aggregate_overlap_rows: list[dict]) -> list[str]:
+    lines = [
+        "These coarse footprint labels are diagnostics only. They are not used as hard independence proof in this MVP.",
+        "",
+    ]
+    lines.extend(
+        _markdown_table(
+            [
+                "depth",
+                "pairs",
+                "disjoint_write",
+                "same_function_overlap",
+                "same_block_overlap",
+                "unknown_overlap",
+                "overlap_and_commute",
+                "overlap_and_sensitive",
+            ],
+            [
+                [
+                    row.get("depth", ""),
+                    row.get("total_pairs", ""),
+                    row.get("disjoint_write", ""),
+                    row.get("same_function_overlap", ""),
+                    row.get("same_block_overlap", ""),
+                    row.get("unknown_overlap", ""),
+                    row.get("overlap_and_commute", ""),
+                    row.get("overlap_and_order_sensitive", ""),
+                ]
+                for row in aggregate_overlap_rows
+            ],
+        )
+    )
+    return lines
 
 
 def _markdown_table(headers: list[str], rows: list[list[str]]) -> list[str]:

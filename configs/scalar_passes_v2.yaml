@@ -1,0 +1,77 @@
+passes:
+  - name: mem2reg
+    pipeline: mem2reg
+    category: scalar
+    stage: v1
+  - name: sroa
+    pipeline: sroa
+    category: scalar
+    stage: v1
+  - name: instcombine
+    pipeline: instcombine
+    category: scalar
+    stage: v1
+  - name: aggressive-instcombine
+    pipeline: aggressive-instcombine
+    category: scalar
+    stage: v1
+  - name: instsimplify
+    pipeline: instsimplify
+    category: scalar
+    stage: v1
+  - name: simplifycfg
+    pipeline: simplifycfg
+    category: cfg
+    stage: v1
+  - name: early-cse
+    pipeline: early-cse
+    category: scalar
+    stage: v1
+  - name: dce
+    pipeline: dce
+    category: cleanup
+    stage: v1
+  - name: adce
+    pipeline: adce
+    category: cleanup
+    stage: v1
+  - name: bdce
+    pipeline: bdce
+    category: cleanup
+    stage: v1
+  - name: reassociate
+    pipeline: reassociate
+    category: scalar
+    stage: v1
+  - name: gvn
+    pipeline: gvn
+    category: memory
+    stage: v1
+  - name: jump-threading
+    pipeline: jump-threading
+    category: cfg
+    stage: v1
+  - name: correlated-propagation
+    pipeline: correlated-propagation
+    category: cfg
+    stage: v1
+  - name: sccp
+    pipeline: sccp
+    category: scalar
+    stage: v2
+  - name: dse
+    pipeline: dse
+    category: memory
+    stage: v2
+  - name: memcpyopt
+    pipeline: memcpyopt
+    category: memory
+    stage: v2
+  - name: sink
+    pipeline: sink
+    category: cfg
+    stage: v2
+  - name: tailcallelim
+    pipeline: tailcallelim
+    category: scalar
+    stage: v2
