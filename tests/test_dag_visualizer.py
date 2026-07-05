@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from phasebatch.dag_visualizer import visualize_dag
+from phasebatch.dag_visualizer import _run_dot, visualize_dag
 
 
 class DagVisualizerTests(unittest.TestCase):
@@ -149,6 +149,22 @@ class DagVisualizerTests(unittest.TestCase):
         self.assertEqual(metrics["duplicate_transitions"], "1")
         self.assertEqual(metrics["merge_rate"], "0.25")
         self.assertEqual(metrics["max_depth"], "2")
+
+    def test_run_dot_uses_resolved_batch_entrypoint_on_windows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake_dot = root / "dot.cmd"
+            fake_dot.write_text("@echo off\r\ncopy /Y %2 %4 >NUL\r\n", encoding="utf-8")
+            dot_file = root / "input.dot"
+            output_file = root / "output.svg"
+            dot_file.write_text("digraph G { A -> B }\n", encoding="utf-8")
+
+            with mock.patch("phasebatch.dag_visualizer.shutil.which", return_value=str(fake_dot)):
+                warning = _run_dot(dot_file, "svg", output_file)
+            output_exists = output_file.exists()
+
+        self.assertEqual(warning, "")
+        self.assertTrue(output_exists)
 
 
 def _make_mock_run(run_dir: Path) -> None:

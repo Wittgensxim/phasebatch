@@ -639,8 +639,14 @@ def _render_outputs(
 
 
 def _run_dot(dot_path: Path, fmt: str, output_path: Path) -> str:
+    dot_command = shutil.which("dot")
+    if dot_command is None:
+        return "graphviz unavailable: dot command not found"
+    command = [dot_command, f"-T{fmt}", str(dot_path), "-o", str(output_path)]
+    if Path(dot_command).suffix.lower() in {".bat", ".cmd"}:
+        command = ["cmd", "/c", *command]
     result = subprocess.run(
-        ["dot", f"-T{fmt}", str(dot_path), "-o", str(output_path)],
+        command,
         text=True,
         capture_output=True,
         check=False,
