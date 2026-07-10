@@ -160,7 +160,8 @@ class ValidationRuntime:
             flight.set_exception(exc)
             raise
         with self._lock:
-            self._equivalences[normalized_key] = equality
+            if equality.tier != "failed":
+                self._equivalences[normalized_key] = equality
             self._equivalence_inflight.pop(normalized_key, None)
         flight.set_result(equality)
         return equality

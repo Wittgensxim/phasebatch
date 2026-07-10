@@ -297,6 +297,40 @@ class ValidationRuntimeTests(unittest.TestCase):
         self.assertEqual(compare_calls, 2)
         self.assertEqual(retried.tier, "different")
 
+    def test_failed_equivalence_result_is_not_cached(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = ValidationRuntime(Path(tmp), max_workers=1)
+            key = ("hash-a", "hash-b", "comparator-v1")
+            compare_calls = 0
+
+            def failed_compare() -> EqualityResult:
+                nonlocal compare_calls
+                compare_calls += 1
+                return EqualityResult(
+                    equal=False,
+                    tier="failed",
+                    can_hard_fold=False,
+                    reason="tool_failed",
+                )
+
+            first = runtime.get_or_compute_equivalence(key, failed_compare)
+
+            def successful_retry() -> EqualityResult:
+                nonlocal compare_calls
+                compare_calls += 1
+                return EqualityResult(
+                    equal=False,
+                    tier="different",
+                    can_hard_fold=False,
+                    reason="llvm_diff_difference",
+                )
+
+            second = runtime.get_or_compute_equivalence(key, successful_retry)
+
+        self.assertEqual(first.tier, "failed")
+        self.assertEqual(second.tier, "different")
+        self.assertEqual(compare_calls, 2)
+
     def test_seed_transition_reuses_verified_profile_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runtime = ValidationRuntime(Path(tmp), max_workers=1)
