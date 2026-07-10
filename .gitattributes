@@ -1,1 +1,2 @@
+worker/build/** -whitespace
 worker/build/phasebatch-worker.exe filter=lfs diff=lfs merge=lfs -text

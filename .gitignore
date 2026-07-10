@@ -26,8 +26,7 @@ scripts.zip
 dist/
 build/
 !worker/build/
-worker/build/*
-!worker/build/phasebatch-worker.exe
+!worker/build/**
 *.egg-info/
 
 .DS_Store
