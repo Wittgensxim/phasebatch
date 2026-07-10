@@ -4,10 +4,23 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import phasebatch.tools as tools_module
 from phasebatch.tools import collect_toolchain, find_tool, write_metadata
 
 
 class ToolchainTests(unittest.TestCase):
+    def test_find_graphviz_dot_uses_python_environment_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            prefix = Path(tmp)
+            dot = prefix / "Library" / "bin" / "graphviz" / "dot.exe"
+            dot.parent.mkdir(parents=True)
+            dot.write_text("", encoding="utf-8")
+
+            with mock.patch("phasebatch.tools.shutil.which", return_value=None):
+                resolved = tools_module.find_graphviz_dot(prefixes=[prefix])
+
+        self.assertEqual(Path(resolved), dot)
+
     def test_find_tool_prefers_explicit_llvm_bin(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tool = Path(tmp) / "opt.exe"

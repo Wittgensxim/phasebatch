@@ -25,7 +25,7 @@ from .optimizer import optimize_batches
 from .pair_cost import write_pair_cost_summary
 from .pair_scheduling import write_pair_scheduling_summary
 from .reduction_summary import summarize_reduction
-from .tools import collect_toolchain
+from .tools import collect_toolchain, find_graphviz_dot
 
 
 STUDY_RUN_FIELDS = [
@@ -200,7 +200,7 @@ def summarize_advisor_report_zh(study_dir: Path) -> dict:
 def generate_advisor_dags(study_dir: Path) -> dict:
     study_dir = Path(study_dir)
     selected = _representative_programs(study_dir)
-    dot = shutil.which("dot")
+    dot = find_graphviz_dot()
     manifest = []
     for program, criterion in selected:
         run_dir = study_dir / "programs" / program / "optimize"

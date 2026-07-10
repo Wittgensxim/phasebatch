@@ -96,7 +96,7 @@ class DagVisualizerTests(unittest.TestCase):
             out_dir = Path(tmp) / "viz"
             _make_mock_run(run_dir)
 
-            with mock.patch("phasebatch.dag_visualizer.shutil.which", return_value=None):
+            with mock.patch("phasebatch.dag_visualizer.find_graphviz_dot", return_value=None):
                 visualize_dag(run_dir, out_dir, view="all", formats=["dot", "svg"], max_full_nodes=200)
 
             summary = (out_dir / "dag_summary.md").read_text(encoding="utf-8")
@@ -113,7 +113,7 @@ class DagVisualizerTests(unittest.TestCase):
             out_dir = Path(tmp) / "viz"
             _make_mock_run(run_dir)
 
-            with mock.patch("phasebatch.dag_visualizer.shutil.which", return_value="dot"), mock.patch("phasebatch.dag_visualizer._run_dot") as fake_dot:
+            with mock.patch("phasebatch.dag_visualizer.find_graphviz_dot", return_value="dot"), mock.patch("phasebatch.dag_visualizer._run_dot") as fake_dot:
                 visualize_dag(
                     run_dir,
                     out_dir,
@@ -159,7 +159,7 @@ class DagVisualizerTests(unittest.TestCase):
             output_file = root / "output.svg"
             dot_file.write_text("digraph G { A -> B }\n", encoding="utf-8")
 
-            with mock.patch("phasebatch.dag_visualizer.shutil.which", return_value=str(fake_dot)):
+            with mock.patch("phasebatch.dag_visualizer.find_graphviz_dot", return_value=str(fake_dot)):
                 warning = _run_dot(dot_file, "svg", output_file)
             output_exists = output_file.exists()
 
@@ -176,7 +176,7 @@ class DagVisualizerTests(unittest.TestCase):
             dot_file.write_text("digraph G { A -> B }\n", encoding="utf-8")
 
             with mock.patch("os.name", "posix"), \
-                mock.patch("phasebatch.dag_visualizer.shutil.which", return_value=str(fake_dot)), \
+                mock.patch("phasebatch.dag_visualizer.find_graphviz_dot", return_value=str(fake_dot)), \
                 mock.patch("phasebatch.dag_visualizer.subprocess.run") as fake_run:
                 warning = _run_dot(dot_file, "svg", output_file)
 

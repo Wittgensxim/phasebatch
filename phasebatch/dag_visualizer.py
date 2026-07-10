@@ -3,12 +3,12 @@ from __future__ import annotations
 import csv
 import os
 import re
-import shutil
 import subprocess
 from collections import Counter, defaultdict
 from pathlib import Path
 
 from .equality_summary import equality_tier_markdown, equality_tier_summary_for_run
+from .tools import find_graphviz_dot
 
 
 DAG_METRIC_FIELDS = [
@@ -613,7 +613,7 @@ def _render_outputs(
     non_dot_formats = [fmt for fmt in formats if fmt != "dot"]
     if not non_dot_formats:
         return warnings, rendered
-    if shutil.which("dot") is None:
+    if find_graphviz_dot() is None:
         warnings.append("graphviz unavailable: dot command not found")
         return warnings, rendered
     for fmt in non_dot_formats:
@@ -642,7 +642,7 @@ def _render_outputs(
 
 
 def _run_dot(dot_path: Path, fmt: str, output_path: Path) -> str:
-    dot_command = shutil.which("dot")
+    dot_command = find_graphviz_dot()
     if dot_command is None:
         return "graphviz unavailable: dot command not found"
     command = [dot_command, f"-T{fmt}", str(dot_path), "-o", str(output_path)]

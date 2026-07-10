@@ -4,11 +4,35 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 
 DEFAULT_LLVM_BIN = Path("E:/llvm/build/bin")
+
+
+def find_graphviz_dot(prefixes: list[Path] | None = None) -> str | None:
+    roots = [Path(prefix) for prefix in prefixes] if prefixes is not None else [Path(sys.prefix)]
+    conda_prefix = os.environ.get("CONDA_PREFIX")
+    if prefixes is None and conda_prefix:
+        conda_root = Path(conda_prefix)
+        if conda_root not in roots:
+            roots.append(conda_root)
+
+    relative_candidates = (
+        Path("Library/bin/graphviz/dot.exe"),
+        Path("Library/bin/dot.exe"),
+        Path("Library/bin/dot.bat"),
+        Path("bin/dot"),
+        Path("bin/dot.exe"),
+    )
+    for root in roots:
+        for relative in relative_candidates:
+            candidate = root / relative
+            if candidate.is_file():
+                return str(candidate)
+    return shutil.which("dot")
 
 
 def find_tool(name: str, required: bool = True) -> str | None:
