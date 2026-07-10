@@ -1,0 +1,28 @@
+root_ir_mode: inlinable-unoptimized
+
+runtime:
+  enabled: true
+  top_k: 2
+  warmups: 0
+  trials: 1
+  timeout: 30
+  expected_exit_code: 0
+  command:
+    - "{exe}"
+  llc_opt_level: O2
+
+stages:
+  - id: ipo
+    passes: ipo_inline_v4.yaml
+    mode: exact
+    max_rounds: 1
+    require_transition: true
+
+  - id: vector_cleanup
+    passes: vector_cleanup_passes_v5.yaml
+    mode: budgeted
+    max_rounds: 1
+    beam_width: 4
+    max_states: 50
+    max_batch_candidates: 40
+    runtime_rerank: true

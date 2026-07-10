@@ -60,6 +60,9 @@ def count_ir_features(path: Path) -> dict[str, int]:
         "loads": 0,
         "stores": 0,
         "calls": 0,
+        "direct_calls": 0,
+        "intrinsic_calls": 0,
+        "indirect_calls": 0,
         "phis": 0,
         "selects": 0,
         "allocas": 0,
@@ -101,6 +104,13 @@ def count_ir_features(path: Path) -> dict[str, int]:
             counts["stores"] += 1
         elif opcode == "call":
             counts["calls"] += 1
+            target = _direct_call_target(stripped)
+            if target is None:
+                counts["indirect_calls"] += 1
+            elif target.startswith("llvm."):
+                counts["intrinsic_calls"] += 1
+            else:
+                counts["direct_calls"] += 1
         elif opcode == "phi":
             counts["phis"] += 1
         elif opcode == "select":
@@ -115,4 +125,13 @@ def _opcode(instruction: str) -> str:
     if " = " in body:
         body = body.split(" = ", 1)[1].strip()
     parts = body.split()
+    while parts and parts[0] in {"tail", "musttail", "notail"}:
+        parts.pop(0)
     return parts[0] if parts else ""
+
+
+def _direct_call_target(instruction: str) -> str | None:
+    match = re.search(r"\bcall\b.*?@(?P<name>\"[^\"]+\"|[-A-Za-z$._0-9]+)\s*\(", instruction)
+    if not match:
+        return None
+    return match.group("name").strip('"')

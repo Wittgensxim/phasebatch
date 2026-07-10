@@ -17,6 +17,55 @@ BOUNDARY_TEXT = (
 
 
 class FinalSummaryTests(unittest.TestCase):
+    def test_final_summary_includes_validation_cost_savings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            _write_complete_run(run_dir)
+            _write_csv(
+                run_dir / "batch_validation_ladder_summary.csv",
+                [
+                    "validation_opt_invocations",
+                    "validation_pass_invocations_baseline",
+                    "validation_pass_invocations_actual",
+                    "validation_pass_invocations_saved",
+                    "validation_profile_reuse_hits",
+                    "validation_state_transition_cache_hits",
+                    "validation_state_equivalence_cache_hits",
+                    "validation_time_ms",
+                ],
+                [
+                    {
+                        "validation_opt_invocations": "9",
+                        "validation_pass_invocations_baseline": "12",
+                        "validation_pass_invocations_actual": "9",
+                        "validation_pass_invocations_saved": "3",
+                        "validation_profile_reuse_hits": "2",
+                        "validation_state_transition_cache_hits": "3",
+                        "validation_state_equivalence_cache_hits": "1",
+                        "validation_time_ms": "30.5",
+                    },
+                    {
+                        "validation_opt_invocations": "6",
+                        "validation_pass_invocations_baseline": "8",
+                        "validation_pass_invocations_actual": "6",
+                        "validation_pass_invocations_saved": "2",
+                        "validation_profile_reuse_hits": "1",
+                        "validation_state_transition_cache_hits": "1",
+                        "validation_state_equivalence_cache_hits": "1",
+                        "validation_time_ms": "19.5",
+                    },
+                ],
+            )
+
+            text = generate_final_summary(run_dir).read_text(encoding="utf-8")
+
+        self.assertIn("## Validation Cost", text)
+        self.assertIn("- validation opt invocations: 15", text)
+        self.assertIn("- validation pass invocations: 20 baseline, 15 actual, 5 saved", text)
+        self.assertIn("- profile reuse hits: 3", text)
+        self.assertIn("- state cache hits: 4 transitions, 2 equivalence comparisons", text)
+        self.assertIn("- validation time ms: 50.000", text)
+
     def test_final_summary_generated_with_all_sections(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp) / "run"
@@ -30,6 +79,7 @@ class FinalSummaryTests(unittest.TestCase):
             "# Final Optimization Summary",
             "## 1. Run Configuration",
             "## 2. Final Result",
+            "## Equality Tier Summary",
             "## Final Pipeline Replay Verification",
             "## 3. Chosen Batch Path",
             "## 4. Why Each Batch Was Executable",
@@ -43,6 +93,9 @@ class FinalSummaryTests(unittest.TestCase):
         self.assertIn("- selected mode: exact", text)
         self.assertIn("- exact_status: exact_complete", text)
         self.assertIn("- final IR instruction count: 3", text)
+        self.assertIn("| tier | count | hard_fold |", text)
+        self.assertIn("| canonical_hash | 1 | 1 |", text)
+        self.assertIn("| structural_diff | 1 | 1 |", text)
 
     def test_missing_baseline_results_warns_without_crashing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -366,11 +419,19 @@ def _write_complete_run(
     )
     (run_dir / "optimized_pipeline.txt").write_text("mem2reg,sroa\n", encoding="utf-8")
     (run_dir / "exact_status.txt").write_text("exact_complete\n", encoding="utf-8")
+    _write_csv(
+        run_dir / "states" / "S0000" / "pair_relation.csv",
+        ["equality_tier", "can_hard_fold"],
+        [
+            {"equality_tier": "canonical_hash", "can_hard_fold": "true"},
+            {"equality_tier": "structural_diff", "can_hard_fold": "true"},
+        ],
+    )
     (run_dir / "metadata.json").write_text(
         json.dumps(
             {
                 "input": "benchmarks/tiny/branch.c",
-                "pass_config": "configs/core_passes.yaml",
+                "pass_config": "configs/core_passes_v1.yaml",
                 "mode": "exact",
                 "objective": "ir-inst-count",
                 "max_rounds": 2,

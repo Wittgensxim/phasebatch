@@ -12,3 +12,6 @@ dependencies = []
 
 [project.scripts]
 phasebatch = "phasebatch.cli:main"
+
+[tool.pytest.ini_options]
+cache_dir = ".pytest_cache_writable"

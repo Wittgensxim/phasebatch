@@ -1,74 +1,75 @@
 # Phasebatch Project Status
 
-This document summarizes the current public project shape. It is meant to help
-new readers understand what is implemented, which outputs matter, and what is
-safe to claim from the generated evidence.
-
 ## Current Scope
 
-Phasebatch is a data-producing LLVM phase-ordering research prototype. Its main
-unit of reasoning is a state-local LLVM IR graph:
+Phasebatch is a data-producing LLVM phase-ordering research prototype. The
+maintained system reasons over a state-local LLVM IR DAG:
 
-- node: a canonical LLVM IR state
-- edge: an executed or observed batch transition
-- merge: multiple paths reaching the same canonical IR hash
+- node: a canonical LLVM IR state;
+- edge: a correctness-allowed batch transition;
+- merge: multiple paths reaching the same canonical IR hash.
 
-The project focuses on pass interaction analysis, certified batch construction,
-state-aware exploration, and evidence reporting. It does not claim global LLVM
-phase-ordering optimality.
+The project compresses pass-order choices. It does not claim global LLVM
+phase-ordering optimality or use runtime/objective values as correctness proof.
 
-## Main Commands
+## Maintained Commands
 
-Use these commands for the stable Core-v1 workflow:
+Execution and search:
 
-- `analyze`: profile one input state and test active pass pairs.
-- `batchify`: build batch candidates from an existing state directory.
-- `optimize-batches`: execute certified batch candidates and select a final
-  reached state by objective.
-- `run-core-v1-budgeted-study`: run budgeted Core-v1 optimization over multiple
-  inputs.
-- `select-and-run-exact-reference`: choose and run exact reference cases from a
-  budgeted study.
-- `run-round-sensitivity`: compare max-round settings for one input.
+- `analyze`
+- `batch`
+- `explore`
+- `explore-batches`
+- `batchify`
+- `optimize-batches`
+- `optimize-staged`
+- `audit-passes`
 
-Use these commands for reporting and explanation over existing outputs:
+Evaluation and evidence over current runs:
 
-- `summarize-reduction`: compute local search-space reduction metrics.
-- `export-evidence-pack`: collect selected and executed batch certificate rows.
-- `diagnose-paths`: compare batch optimizer paths with greedy/random/config
-  order baselines.
-- `visualize-dag`: generate CGO-2006-style DOT/CSV/Markdown views of the
-  compressed state DAG.
-- `summarize-components`: summarize conflict graph components and interaction
-  edges.
-- `summarize-core-v1-case-study`: assemble the final Core-v1 narrative report.
+- `eval-batches`
+- `compare-baselines`
+- `summarize-final`
+- `summarize-reduction`
+- `summarize-components`
+- `export-evidence-pack`
+- `diagnose-paths`
+- `visualize-dag`
+- `replay-final-pipeline`
 
-Use these commands for pass-set extension studies:
+Worker acceptance:
 
-- `audit-passes`: resolve pass pipelines accepted by the local LLVM build.
-- `run-v2-extension-study`: compare Core-v1 with scalar/memory/CFG v2.
-- `run-v3-loop-smoke`: test loop-middle-end v3 on loop-heavy programs.
-- `summarize-passsets`: combine pass-set smoke outputs into one report.
+- `verify-opt-worker`
+- `benchmark-opt-worker`
 
-## Evidence Boundary
+Advisor reporting:
 
-Only `certified_batch` candidates with `all_permutations_same` validation are
-hard-folding evidence. Sampled, objective-only, rejected, failed, unknown, or
-unvalidated data are diagnostic or evaluation signals.
+- `run-advisor-report-zh`
+- `summarize-advisor-report-zh`
 
-Important boundaries:
+The maintained construction path is full pairwise plus reuse/cache. Exact and
+budgeted search, exhaustive/bounded/sampled/DAG validation, lazy pair testing,
+and staged runtime reranking remain available where documented.
 
-- Objective values are used for ranking or path selection only.
-- Coarse footprint/overlap labels are diagnostic only.
-- Reduction metrics are state-local and apply only to reached states.
-- DAG visualization does not create new correctness evidence; it displays
-  evidence already recorded by validation and correctness files.
-- Exact mode is exact only within the certified batch-state graph and the
-  configured bounds.
+## Correctness Boundary
 
-## Important Output Families
+Only a `certified_batch` with an `all_permutations_same` hard certificate may
+be hard-folded. Sampled, bounded, rejected, failed, unknown, or unvalidated
+results are not hard-folding evidence.
 
-Optimize-batches runs write:
+- Pair relations are state-local.
+- Unknown/failed pairs remain separate evidence categories but are operational
+  conflict edges with `can_hard_fold=false`.
+- Coarse footprint/overlap is diagnostic only.
+- DAG visualization displays evidence; it does not create evidence.
+- Runtime and instruction-count objectives rank already safe states only.
+- Exactness is bounded by the configured pass set, reached state graph,
+  component/candidate limits, validation limits, and state cap.
+- A staged run is exact only when every stage is exact and complete.
+
+## Output Families
+
+Optimizer root outputs:
 
 - `states.csv`
 - `state_dag.csv`
@@ -77,66 +78,96 @@ Optimize-batches runs write:
 - `chosen_path.csv`
 - `chosen_path_summary.csv`
 - `optimized_pipeline.txt`
-- `final.ll`
 - `pipeline_replay.csv`
 - `optimize_summary.md`
 - `final_summary.md`
+- `exact_status.txt`
 
-Reduction and evidence reports add:
+Per-state evidence:
 
-- `reduction_by_state.csv`
-- `reduction_summary.csv`
-- `reduction_summary.md`
-- `evidence_pack.csv`
-- `selected_batch_certificates.csv`
-- `executed_batch_certificates.csv`
-- `evidence_pack.md`
+- `pass_profile.csv`
+- `pair_relation.csv`
+- `pair_cost_summary.csv`
+- `batch_components.csv`
+- `batch_candidates.csv`
+- `batch_validation.csv`
+- `batch_correctness.csv`
+- `coverage_report.csv`
+- `coverage_summary.csv`
+- `footprint_overlap.csv`
 
-DAG visualization adds:
+Staged runs add:
 
-- `state_dag_full.dot`
-- `state_dag_selected.dot`
-- `depth_overview.dot`
-- `dag_metrics.csv`
-- `dag_depth_metrics.csv`
-- `dag_paths.csv`
-- `dag_summary.md`
+- `staged_summary.csv`
+- `staged_pipeline.csv`
+- `staged_replay.csv`
+- `staged_summary.md`
+- optional `runtime_candidates.csv`, `runtime_trials.csv`,
+  `runtime_summary.csv`, and `runtime_selection.md`.
 
-SVG and PNG graph files are produced only when Graphviz `dot` is installed.
+## Strict LLVM Worker
+
+The long-lived C++ LLVM worker is the strict default for commands that execute
+LLVM. It provides isolated LLVM contexts, in-memory pass pipelines,
+reference-counted module handles, bounded path caches, deferred materialization,
+and in-process `LLVMDiff` comparison.
+
+`--opt-backend external` remains available only for intentional comparison.
+Pass-side `LLVM ERROR:` exits become conservative `llvm_fatal` pipeline
+failures and restart the affected worker. Timeout, protocol, and infrastructure
+errors raise in strict mode. No strict-worker failure silently falls back.
+
+The matched Salsa20 Core-v1 exact run measured:
+
+| Metric | External opt | Worker | Change |
+|---|---:|---:|---:|
+| wall-clock | 87.798 s | 25.053 s | 3.504x faster |
+| optimizer time | 84.593 s | 22.713 s | 3.724x faster |
+| pair testing | 7.252 s | 3.084 s | 2.352x faster |
+| batch validation | 74.300 s | 17.614 s | 4.218x faster |
+
+Both runs selected the same state and pipeline, matched all pair and batch
+classifications, and passed replay.
+
+## Staged Runtime Result
+
+The retained Salsa20 E5 study uses required IPO, scalar v2, loop/cleanup v4,
+and an isolated vector/cleanup v5 stage. Runtime reranking correctly rejected
+the slower vectorized candidates. The selected E5 result was 28.23% slower than
+LLVM `default<O2>` on the matched cyclic benchmark, so the vector sequence is
+not part of the default pipeline.
+
+Evidence:
+`outputs/salsa20_staged_v5_fixed_20260710/e5_experiment_report.md`.
+
+## Advisor Report
+
+The accepted Advisor Data Report v1 study contains 20 deterministic
+SingleSource C programs under strict worker mode. It fixes pairwise construction,
+full pair testing, auto batch validation, and the existing correctness
+classifier. It emits aggregate CSVs, nine PNG/SVG figure families,
+representative DAG DOT files, one Chinese report per program, and the complete
+Chinese advisor report.
+
+Evidence:
+`outputs/advisor_report_zh_20programs/advisor_report_zh.md`.
 
 ## Repository Hygiene
 
-Generated experiment outputs should stay under `outputs/`. The repository keeps
-`outputs/.gitkeep` tracked but ignores the generated output tree. Public commits
-should include source code, configs, tests, docs, tiny benchmarks, and scripts.
+The source tree keeps only the maintained code, configs, tests, docs, tiny
+benchmarks, worker source/build entrypoint, and selected local evidence runs.
+Generated runs remain ignored by Git.
 
-Do not publish:
+Normal execution removes `.ll` intermediates and empty directories.
+`--keep-ir-artifacts` or `--dump-validation-dag` intentionally preserves debug
+IR. Local caches, copied papers, archives, bytecode and old experiment trees do
+not belong in the maintained workspace.
 
-- generated `outputs/` result trees
-- local editor or agent metadata
-- third-party PDFs copied into the workspace
-- machine-local cache directories
+## Verification
 
-## Suggested Verification
-
-Before publishing or reporting a result, run:
-
-```bash
+```powershell
 D:/Miniconda/envs/dlm/python.exe -m pytest -q
 ```
 
-For a fresh DAG visualization smoke:
-
-```bash
-D:/Miniconda/envs/dlm/python.exe -m phasebatch visualize-dag \
-  --run-dir outputs/verify_dag_branch_exact \
-  --out outputs/verify_dag_branch_exact/dag_viz \
-  --view all \
-  --formats dot svg png \
-  --max-full-nodes 200 \
-  --include-selected-path \
-  --include-depth-overview
-```
-
-If Graphviz is not installed, the command should still write DOT, CSV, and
-Markdown files and record the missing `dot` command in `dag_summary.md`.
+Graphviz is optional. Without `dot`, DAG commands still emit deterministic DOT,
+CSV and Markdown and record the missing renderer.

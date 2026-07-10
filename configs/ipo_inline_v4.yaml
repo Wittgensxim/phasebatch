@@ -1,0 +1,8 @@
+passes:
+  - name: inline
+    pipeline_candidates:
+      - module(cgscc(inline))
+      - cgscc(inline)
+      - module-inline
+    category: ipo
+    stage: ipo

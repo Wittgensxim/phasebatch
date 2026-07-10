@@ -66,3 +66,25 @@ else:
         self.assertEqual(features["calls"], 1)
         self.assertEqual(features["selects"], 1)
         self.assertEqual(features["allocas"], 1)
+
+    def test_classifies_direct_intrinsic_indirect_and_tail_calls(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "calls.ll"
+            path.write_text(
+                """define void @f(ptr %fp) {
+entry:
+  tail call void @direct()
+  call void @llvm.lifetime.start.p0(i64 4, ptr null)
+  call void %fp()
+  ret void
+}
+""",
+                encoding="utf-8",
+            )
+
+            features = count_ir_features(path)
+
+        self.assertEqual(features["calls"], 3)
+        self.assertEqual(features["direct_calls"], 1)
+        self.assertEqual(features["intrinsic_calls"], 1)
+        self.assertEqual(features["indirect_calls"], 1)

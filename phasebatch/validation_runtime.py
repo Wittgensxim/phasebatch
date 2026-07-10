@@ -9,6 +9,8 @@ from threading import BoundedSemaphore, RLock
 from typing import TypeVar
 
 from .ir_equivalence import EqualityResult
+from .runner import release_run_result
+from .schema import RunResult
 
 
 T = TypeVar("T")
@@ -27,6 +29,7 @@ class ValidationTransition:
     ir_path: Path
     canonical_hash: str
     source: str
+    run_result: RunResult | None = None
 
 
 @dataclass(frozen=True)
@@ -37,6 +40,7 @@ class ValidationRuntimeSnapshot:
     state_transition_cache_misses: int
     state_equivalence_cache_hits: int
     state_equivalence_cache_misses: int
+    released_handles: int
 
 
 class ValidationRuntime:
@@ -63,6 +67,8 @@ class ValidationRuntime:
         self._state_transition_cache_misses = 0
         self._state_equivalence_cache_hits = 0
         self._state_equivalence_cache_misses = 0
+        self._released_handles = 0
+        self._closed = False
 
     def run_with_opt_slot(self, operation: Callable[[], T]) -> T:
         with self._opt_slots:
@@ -175,7 +181,64 @@ class ValidationRuntime:
                 state_transition_cache_misses=self._state_transition_cache_misses,
                 state_equivalence_cache_hits=self._state_equivalence_cache_hits,
                 state_equivalence_cache_misses=self._state_equivalence_cache_misses,
+                released_handles=self._released_handles,
             )
+
+    def close(self, *, timeout: int = 10) -> int:
+        with self._lock:
+            if self._closed and not self._transitions:
+                return 0
+            self._closed = True
+            transition_items = list(self._transitions.items())
+            self._equivalences.clear()
+
+        groups: dict[int, tuple[RunResult | None, list[ValidationTransitionKey]]] = {}
+        for key, transition in transition_items:
+            result = transition.run_result
+            group_key = id(result) if result is not None else id(transition)
+            if group_key not in groups:
+                groups[group_key] = (result, [])
+            groups[group_key][1].append(key)
+
+        released = 0
+        completed_keys: list[ValidationTransitionKey] = []
+        errors: list[BaseException] = []
+        for result, keys in groups.values():
+            completed = (
+                result is None
+                or result.backend != "worker"
+                or not result.module_handle
+                or not result.module_handle_owned
+            )
+            if not completed:
+                try:
+                    did_release = release_run_result(result, timeout=timeout)
+                except BaseException as exc:
+                    errors.append(exc)
+                else:
+                    if did_release:
+                        released += 1
+                    completed = did_release or not result.module_handle_owned
+                    if not completed:
+                        errors.append(RuntimeError(f"worker handle release returned false: {result.module_handle}"))
+            if completed:
+                completed_keys.extend(keys)
+
+        with self._lock:
+            for key in completed_keys:
+                self._transitions.pop(key, None)
+            self._released_handles += released
+        if errors:
+            raise RuntimeError(
+                f"failed to release {len(errors)} validation worker handle(s): {errors[0]}"
+            ) from errors[0]
+        return released
+
+    def __enter__(self) -> "ValidationRuntime":
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback) -> None:
+        self.close()
 
     @staticmethod
     def _normalize_equivalence_key(key: EquivalenceKey) -> EquivalenceKey:

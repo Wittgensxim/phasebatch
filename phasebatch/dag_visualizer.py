@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import csv
+import os
 import re
 import shutil
 import subprocess
 from collections import Counter, defaultdict
 from pathlib import Path
+
+from .equality_summary import equality_tier_markdown, equality_tier_summary_for_run
 
 
 DAG_METRIC_FIELDS = [
@@ -643,7 +646,10 @@ def _run_dot(dot_path: Path, fmt: str, output_path: Path) -> str:
     if dot_command is None:
         return "graphviz unavailable: dot command not found"
     command = [dot_command, f"-T{fmt}", str(dot_path), "-o", str(output_path)]
-    if Path(dot_command).suffix.lower() in {".bat", ".cmd"}:
+    is_batch_entrypoint = str(dot_command).lower().endswith((".bat", ".cmd"))
+    if is_batch_entrypoint and os.name != "nt":
+        return "graphviz render skipped: .cmd/.bat dot entrypoint cannot run on non-Windows"
+    if is_batch_entrypoint:
         command = ["cmd", "/c", *command]
     result = subprocess.run(
         command,
@@ -808,6 +814,8 @@ def _write_summary(
                     for row in depth_rows
                 ],
             ),
+            "",
+            *equality_tier_markdown(equality_tier_summary_for_run(run_dir)),
             "",
             "## Warnings",
             "",

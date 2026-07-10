@@ -5,6 +5,7 @@ import math
 from collections import Counter
 from pathlib import Path
 
+from .equality_summary import equality_tier_markdown, equality_tier_summary_for_run
 from .schema import REDUCTION_BY_STATE_FIELDS, REDUCTION_SUMMARY_FIELDS
 
 
@@ -161,6 +162,8 @@ def _write_markdown(path: Path, rows: list[dict], summary: dict, run_dir: Path) 
             ["total tested pairs", "commute", "order-sensitive", "unknown"],
             [[str(pair_totals["tested"]), str(pair_totals["commute"]), str(pair_totals["sensitive"]), str(pair_totals["unknown"])]],
         ),
+        "",
+        *equality_tier_markdown(equality_tier_summary_for_run(run_dir)),
         "",
         "## Batch Correctness",
         "",

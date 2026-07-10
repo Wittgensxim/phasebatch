@@ -497,7 +497,7 @@ Validate in that order until enough executable rows are found. Re-run the existi
 
 - [ ] **Step 7: Record scope**
 
-Add strategy to metadata and summaries. Exact always forces `all`; CEGAR remains unchanged unless explicitly supported by a future design.
+Add strategy to metadata and summaries. Exact always forces `all`; the maintained pairwise construction path remains unchanged.
 
 - [ ] **Step 8: Run focused on-demand tests GREEN**
 

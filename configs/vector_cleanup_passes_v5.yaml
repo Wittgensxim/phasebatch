@@ -1,0 +1,45 @@
+passes:
+  - name: loop-vectorize
+    pipeline_candidates:
+      - function(loop-vectorize)
+      - loop-vectorize
+    category: vector
+    stage: vector-cleanup
+  - name: slp-vectorizer
+    pipeline_candidates:
+      - function(slp-vectorizer)
+      - slp-vectorizer
+    category: vector
+    stage: vector-cleanup
+  - name: vector-combine
+    pipeline_candidates:
+      - function(vector-combine)
+      - vector-combine
+    category: vector
+    stage: vector-cleanup
+  - name: loop-unroll-o2
+    pipeline_candidates:
+      - function(loop-unroll<O2>)
+      - loop-unroll<O2>
+    category: loop
+    stage: vector-cleanup
+  - name: instcombine
+    pipeline: instcombine
+    category: scalar
+    stage: vector-cleanup
+  - name: simplifycfg
+    pipeline: simplifycfg
+    category: cfg
+    stage: vector-cleanup
+  - name: dce
+    pipeline: dce
+    category: cleanup
+    stage: vector-cleanup
+  - name: adce
+    pipeline: adce
+    category: cleanup
+    stage: vector-cleanup
+  - name: bdce
+    pipeline: bdce
+    category: cleanup
+    stage: vector-cleanup

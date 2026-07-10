@@ -6,6 +6,7 @@ import shutil
 import time
 from pathlib import Path
 
+from .ir_equivalence import compare_ir_equivalence
 from .normalizer import canonical_hash
 from .runner import run_opt
 from .schema import PIPELINE_REPLAY_FIELDS
@@ -19,10 +20,6 @@ def replay_optimized_pipeline(run_dir: Path, timeout: int = 10) -> dict:
     replay_output = run_dir / "replayed_final.ll"
     optimized_pipeline = _read_pipeline(run_dir / "optimized_pipeline.txt")
     start = time.perf_counter()
-    error_message = ""
-    replay_hash = ""
-    final_hash = ""
-
     if not root_ir.exists():
         row = _row(run_dir, root_ir, optimized_pipeline, replay_output, final_ir, "", "", False, "failed", f"missing root IR: {root_ir}", start)
         _write_csv(run_dir / "pipeline_replay.csv", PIPELINE_REPLAY_FIELDS, [row])
@@ -34,11 +31,7 @@ def replay_optimized_pipeline(run_dir: Path, timeout: int = 10) -> dict:
 
     if not optimized_pipeline:
         shutil.copyfile(root_ir, replay_output)
-        replay_hash = canonical_hash(replay_output)
-        final_hash = canonical_hash(final_ir)
-        hashes_match = replay_hash == final_hash
-        status = "success" if hashes_match else "mismatch"
-        row = _row(run_dir, root_ir, optimized_pipeline, replay_output, final_ir, replay_hash, final_hash, hashes_match, status, "", start)
+        row = _comparison_row(run_dir, root_ir, optimized_pipeline, replay_output, final_ir, start, timeout)
         _write_csv(run_dir / "pipeline_replay.csv", PIPELINE_REPLAY_FIELDS, [row])
         return {**row, "pipeline_replay_csv": str(run_dir / "pipeline_replay.csv")}
 
@@ -58,11 +51,7 @@ def replay_optimized_pipeline(run_dir: Path, timeout: int = 10) -> dict:
         _write_csv(run_dir / "pipeline_replay.csv", PIPELINE_REPLAY_FIELDS, [row])
         return {**row, "pipeline_replay_csv": str(run_dir / "pipeline_replay.csv")}
 
-    replay_hash = canonical_hash(replay_output)
-    final_hash = canonical_hash(final_ir)
-    hashes_match = replay_hash == final_hash
-    status = "success" if hashes_match else "mismatch"
-    row = _row(run_dir, root_ir, optimized_pipeline, replay_output, final_ir, replay_hash, final_hash, hashes_match, status, "", start)
+    row = _comparison_row(run_dir, root_ir, optimized_pipeline, replay_output, final_ir, start, timeout)
     _write_csv(run_dir / "pipeline_replay.csv", PIPELINE_REPLAY_FIELDS, [row])
     return {**row, "pipeline_replay_csv": str(run_dir / "pipeline_replay.csv")}
 
@@ -85,6 +74,13 @@ def _row(
     replay_status: str,
     error_message: str,
     start: float,
+    *,
+    text_hash_equal: bool | None = None,
+    llvm_diff_equal: bool | None = None,
+    module_fingerprint_equal: bool | None = None,
+    equality_tier: str = "",
+    equality_reason: str = "",
+    can_hard_fold: bool | None = None,
 ) -> dict:
     return {
         "program": run_dir.name,
@@ -95,10 +91,58 @@ def _row(
         "replay_hash": replay_hash,
         "final_hash": final_hash,
         "hashes_match": _bool(hashes_match),
+        "text_hash_equal": _bool_or_empty(text_hash_equal),
+        "llvm_diff_equal": _bool_or_empty(llvm_diff_equal),
+        "module_fingerprint_equal": _bool_or_empty(module_fingerprint_equal),
+        "equality_tier": equality_tier,
+        "equality_reason": equality_reason,
+        "can_hard_fold": _bool_or_empty(can_hard_fold),
         "replay_status": replay_status,
         "error_message": error_message,
         "time_ms": f"{(time.perf_counter() - start) * 1000:.3f}",
     }
+
+
+def _comparison_row(
+    run_dir: Path,
+    root_ir: Path,
+    optimized_pipeline: str,
+    replay_output: Path,
+    final_ir: Path,
+    start: float,
+    timeout: int,
+) -> dict:
+    equality = compare_ir_equivalence(replay_output, final_ir, tools=_replay_tools(run_dir), timeout=timeout)
+    replay_hash = equality.left_hash or canonical_hash(replay_output)
+    final_hash = equality.right_hash or canonical_hash(final_ir)
+    if equality.can_hard_fold:
+        status = "success"
+        error_message = ""
+    elif equality.tier == "failed":
+        status = "failed"
+        error_message = equality.error_message or equality.reason
+    else:
+        status = "mismatch"
+        error_message = ""
+    return _row(
+        run_dir,
+        root_ir,
+        optimized_pipeline,
+        replay_output,
+        final_ir,
+        replay_hash,
+        final_hash,
+        equality.can_hard_fold,
+        status,
+        error_message,
+        start,
+        text_hash_equal=equality.text_hash_equal,
+        llvm_diff_equal=equality.llvm_diff_equal,
+        module_fingerprint_equal=equality.module_fingerprint_equal,
+        equality_tier=equality.tier,
+        equality_reason=equality.reason,
+        can_hard_fold=equality.can_hard_fold,
+    )
 
 
 def _read_pipeline(path: Path) -> str:
@@ -130,8 +174,7 @@ def _split_pipeline(value: str) -> list[str]:
 
 
 def _opt_path(run_dir: Path) -> str:
-    metadata = _read_json(run_dir / "metadata.json")
-    opt = ((metadata.get("tools") or {}).get("opt") or {}).get("path")
+    opt = _replay_tools(run_dir).get("opt")
     if opt:
         return str(opt)
     collected = collect_toolchain()
@@ -139,6 +182,15 @@ def _opt_path(run_dir: Path) -> str:
     if not opt:
         raise RuntimeError("could not find opt for pipeline replay")
     return str(opt)
+
+
+def _replay_tools(run_dir: Path) -> dict[str, str]:
+    metadata = _read_json(Path(run_dir) / "metadata.json")
+    return {
+        name: details["path"]
+        for name, details in (metadata.get("tools") or {}).items()
+        if isinstance(details, dict) and details.get("path")
+    }
 
 
 def _read_json(path: Path) -> dict:
@@ -182,6 +234,9 @@ def _update_optimize_summary(path: Path, replay_result: dict | None, replay_veri
             [
                 f"- replay_status: {replay_result.get('replay_status', '')}",
                 f"- hashes_match: {replay_result.get('hashes_match', '')}",
+                f"- equality_tier: {replay_result.get('equality_tier', '')}",
+                f"- equality_reason: {replay_result.get('equality_reason', '')}",
+                f"- can_hard_fold: {replay_result.get('can_hard_fold', '')}",
                 f"- replay_hash: {replay_result.get('replay_hash', '')}",
                 f"- final_hash: {replay_result.get('final_hash', '')}",
                 f"- replayed_final_ll: {replay_result.get('replay_output_path', '')}",
@@ -207,3 +262,7 @@ def _read_csv_with_fields(path: Path) -> tuple[list[dict], list[str]]:
 
 def _bool(value: bool) -> str:
     return "true" if value else "false"
+
+
+def _bool_or_empty(value: bool | None) -> str:
+    return "" if value is None else _bool(value)

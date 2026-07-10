@@ -222,53 +222,7 @@ def compare_baselines(
 
 
 def run_opt_raw_pipeline(opt: str, input_ll: Path, pipeline: str, output_ll: Path, timeout: int) -> RunResult:
-    output_ll.parent.mkdir(parents=True, exist_ok=True)
-    command = [
-        opt,
-        "-S",
-        "-verify-each",
-        f"-passes={pipeline}",
-        str(input_ll),
-        "-o",
-        str(output_ll),
-    ]
-    start = time.perf_counter()
-    try:
-        completed = subprocess.run(command, text=True, capture_output=True, check=False, timeout=timeout)
-        elapsed = (time.perf_counter() - start) * 1000
-        return RunResult(
-            command=command,
-            returncode=completed.returncode,
-            stdout=completed.stdout,
-            stderr=completed.stderr,
-            time_ms=elapsed,
-            failure_kind="" if completed.returncode == 0 else "nonzero_exit",
-            output_path=output_ll,
-        )
-    except subprocess.TimeoutExpired as exc:
-        elapsed = (time.perf_counter() - start) * 1000
-        stderr = _decode_timeout_stream(exc.stderr) or f"timeout after {timeout}s"
-        return RunResult(
-            command=command,
-            returncode=-1,
-            stdout=_decode_timeout_stream(exc.stdout),
-            stderr=stderr,
-            time_ms=elapsed,
-            timed_out=True,
-            failure_kind="timeout",
-            output_path=output_ll,
-        )
-    except OSError as exc:
-        elapsed = (time.perf_counter() - start) * 1000
-        return RunResult(
-            command=command,
-            returncode=-1,
-            stdout="",
-            stderr=str(exc),
-            time_ms=elapsed,
-            failure_kind="failed_to_start",
-            output_path=output_ll,
-        )
+    return run_opt(opt, input_ll, [pipeline], output_ll, timeout)
 
 
 def _run_opt_safely(opt: str, input_ll: Path, passes: list[str], output_ll: Path, timeout: int) -> RunResult:
@@ -1191,7 +1145,10 @@ def _batch_optimizer_costs(run_dir: Path) -> dict:
         for row in _read_csv(state_dir / "pair_relation.csv"):
             if row.get("dynamic_relation") == "not_tested" or row.get("failure_kind") == "max_pairs":
                 continue
-            pair_opt_invocations += 2
+            if row.get("pair_test_opt_runs") not in {"", None}:
+                pair_opt_invocations += int(_parse_float(row.get("pair_test_opt_runs")) or 0)
+            else:
+                pair_opt_invocations += 2
         for row in _read_csv(state_dir / "batch_validation.csv"):
             batch_validation_time += _parse_float(row.get("time_ms")) or 0.0
             validation_opt_invocations += _parse_int(row.get("tested_orders")) or 0

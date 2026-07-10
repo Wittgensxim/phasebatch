@@ -87,6 +87,8 @@ def _coverage_status(
     class_set = set(correctness_classes)
     if "certified_batch" in class_set:
         return "certified_covered", "active pass appears in at least one certified batch"
+    if "bounded_batch" in class_set:
+        return "heuristic_covered", "active pass appears in bounded batch only; not a hard certificate"
     if "sampled_batch" in class_set:
         return "heuristic_covered", "active pass appears in sampled batch only; not a hard certificate"
     if terminal_not_validated and (covering_candidates or containing_components):

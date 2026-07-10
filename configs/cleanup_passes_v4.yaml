@@ -1,0 +1,21 @@
+passes:
+  - name: instcombine
+    pipeline: instcombine
+    category: scalar
+    stage: cleanup
+  - name: simplifycfg
+    pipeline: simplifycfg
+    category: cfg
+    stage: cleanup
+  - name: dce
+    pipeline: dce
+    category: cleanup
+    stage: cleanup
+  - name: adce
+    pipeline: adce
+    category: cleanup
+    stage: cleanup
+  - name: bdce
+    pipeline: bdce
+    category: cleanup
+    stage: cleanup

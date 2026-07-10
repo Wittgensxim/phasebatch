@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import csv
-import subprocess
-import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable
@@ -10,7 +8,7 @@ from typing import Callable
 from .batch_objective import count_ir_instructions
 from .normalizer import canonical_hash
 from .pass_config import PassSpec, load_pass_config
-from .runner import prepare_input_ir
+from .runner import prepare_input_ir, run_opt
 from .schema import RunResult
 from .tools import collect_toolchain, write_metadata
 
@@ -128,44 +126,7 @@ def audit_passes(
 
 
 def run_opt_pipeline(opt: str, input_ll: Path, pipeline: str, output_ll: Path, timeout: int) -> RunResult:
-    output_ll.parent.mkdir(parents=True, exist_ok=True)
-    command = [opt, "-S", "-verify-each", f"-passes={pipeline}", str(input_ll), "-o", str(output_ll)]
-    start = time.perf_counter()
-    try:
-        completed = subprocess.run(command, text=True, capture_output=True, check=False, timeout=timeout)
-        elapsed = (time.perf_counter() - start) * 1000
-        return RunResult(
-            command=command,
-            returncode=completed.returncode,
-            stdout=completed.stdout,
-            stderr=completed.stderr,
-            time_ms=elapsed,
-            failure_kind="" if completed.returncode == 0 else "nonzero_exit",
-            output_path=output_ll,
-        )
-    except subprocess.TimeoutExpired as exc:
-        elapsed = (time.perf_counter() - start) * 1000
-        return RunResult(
-            command=command,
-            returncode=-1,
-            stdout=_decode_timeout_stream(exc.stdout),
-            stderr=_decode_timeout_stream(exc.stderr) or f"timeout after {timeout}s",
-            time_ms=elapsed,
-            timed_out=True,
-            failure_kind="timeout",
-            output_path=output_ll,
-        )
-    except OSError as exc:
-        elapsed = (time.perf_counter() - start) * 1000
-        return RunResult(
-            command=command,
-            returncode=-1,
-            stdout="",
-            stderr=str(exc),
-            time_ms=elapsed,
-            failure_kind="failed_to_start",
-            output_path=output_ll,
-        )
+    return run_opt(opt, input_ll, [pipeline], output_ll, timeout)
 
 
 def _audit_one_pass(

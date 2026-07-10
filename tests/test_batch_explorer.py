@@ -1,14 +1,45 @@
 import csv
+import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
+import phasebatch.batch_explorer as batch_explorer
 from phasebatch.batch_explorer import _select_candidate_batches, _select_next_frontier, explore_batches
 from phasebatch.schema import BATCH_VALIDATION_FIELDS, RunResult
 
 
 class BatchExplorerTests(unittest.TestCase):
+    def test_explore_records_pair_matrix_completeness_in_run_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result, out_dir, _fake_analyze = _run_fake_batch_explore(
+                Path(tmp),
+                validate_batches=True,
+                validation_statuses={"B0000": "all_permutations_same", "B0001": "all_permutations_same"},
+                max_depth=0,
+            )
+            metadata = json.loads((out_dir / "metadata.json").read_text(encoding="utf-8"))
+
+        self.assertTrue(metadata["pair_matrix_complete"])
+        self.assertEqual(result["pair_matrix_complete"], "true")
+
+    def test_explore_rejects_non_pairwise_batch_construction(self) -> None:
+        with self.assertRaisesRegex(ValueError, "only supports pairwise"):
+            explore_batches(
+                Path("in.ll"),
+                Path("out"),
+                Path("passes.yaml"),
+                jobs=1,
+                timeout=1,
+                max_pairs=None,
+                max_depth=0,
+                max_component_size=10,
+                max_batch_candidates=200,
+                validate_batches=True,
+                batch_construction_mode="experimental",
+            )
+
     def test_depth_one_batch_explore_caches_duplicate_batch_successors_with_certified_batches(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             result, out_dir, fake_analyze = _run_fake_batch_explore(
@@ -67,6 +98,10 @@ class BatchExplorerTests(unittest.TestCase):
         self.assertIn("Enable/suppress counts", multistate_summary)
         self.assertIn("True relation flips among pairs active in both states", multistate_summary)
         self.assertIn("Batch Explore Summary", summary)
+        self.assertIn("## Equality Tier Summary", summary)
+        self.assertIn("| tier | count | hard_fold |", summary)
+        self.assertIn("| structural_diff | 1 | 1 |", summary)
+        self.assertIn("| different | 1 | 0 |", summary)
         self.assertIn("Coverage Invariant", summary)
         self.assertIn("Coarse Footprint / Overlap Diagnostics", summary)
         self.assertIn("These coarse footprint labels are diagnostics only. They are not used as hard independence proof in this MVP.", summary)
@@ -419,7 +454,7 @@ def _run_fake_batch_explore(
             )
             _write_csv(
                 state_dir / "pair_relation.csv",
-                ["program", "state_id", "pass_a", "pass_b", "final_relation"],
+                ["program", "state_id", "pass_a", "pass_b", "final_relation", "equality_tier", "can_hard_fold"],
                 [
                     {
                         "program": "batch_explore",
@@ -427,6 +462,8 @@ def _run_fake_batch_explore(
                         "pass_a": "pass-a",
                         "pass_b": "pass-b",
                         "final_relation": "final_order_sensitive",
+                        "equality_tier": "different",
+                        "can_hard_fold": "false",
                     }
                 ],
             )
@@ -488,7 +525,7 @@ def _run_fake_batch_explore(
         )
         _write_csv(
             state_dir / "pair_relation.csv",
-            ["program", "state_id", "pass_a", "pass_b", "final_relation"],
+            ["program", "state_id", "pass_a", "pass_b", "final_relation", "equality_tier", "can_hard_fold"],
             [
                 {
                     "program": "batch_explore",
@@ -496,6 +533,8 @@ def _run_fake_batch_explore(
                     "pass_a": "pass-a",
                     "pass_b": "pass-b",
                     "final_relation": "final_commute",
+                    "equality_tier": "structural_diff",
+                    "can_hard_fold": "true",
                 }
             ],
         )

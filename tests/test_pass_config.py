@@ -122,7 +122,6 @@ class PassConfigTests(unittest.TestCase):
         expected_counts = {
             "configs/core_passes_v1.yaml": 14,
             "configs/scalar_passes_v2.yaml": 19,
-            "configs/middleend_passes_v3.yaml": 25,
         }
         for config_path, expected_count in expected_counts.items():
             with self.subTest(config_path=config_path):

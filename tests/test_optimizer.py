@@ -6,12 +6,123 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from phasebatch.optimizer import _flatten_pipeline, _flatten_pipeline_names, optimize_batches, score_frontier_state
+from phasebatch.optimizer import (
+    _flatten_pipeline,
+    _flatten_pipeline_names,
+    _run_timed_batch_validation,
+    _select_diversity_preserving_beam,
+    _state_pair_matrix_complete,
+    _write_optimizer_timing,
+    optimize_batches,
+    score_frontier_state,
+)
 from phasebatch.pass_config import PassRegistry, PassSpec
 from phasebatch.schema import BATCH_VALIDATION_FIELDS, RunResult
 
 
 class OptimizerTests(unittest.TestCase):
+    def test_lazy_mode_never_reports_a_complete_pair_matrix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp)
+            _write_csv(
+                state_dir / "pass_profile.csv",
+                ["pass", "success", "active"],
+                [
+                    {"pass": "a", "success": "true", "active": "true"},
+                    {"pass": "b", "success": "true", "active": "true"},
+                ],
+            )
+            _write_csv(
+                state_dir / "pair_relation.csv",
+                ["pass_a", "pass_b", "dynamic_relation", "failure_kind", "skipped_by_budget"],
+                [
+                    {
+                        "pass_a": "a",
+                        "pass_b": "b",
+                        "dynamic_relation": "dynamic_commute",
+                        "failure_kind": "",
+                        "skipped_by_budget": "false",
+                    }
+                ],
+            )
+
+            self.assertTrue(_state_pair_matrix_complete(state_dir, pair_testing_mode="full"))
+            self.assertFalse(_state_pair_matrix_complete(state_dir, pair_testing_mode="lazy"))
+
+    def test_score_beam_preserves_distinct_static_feature_buckets(self) -> None:
+        def row(state_id, *, objective, calls, memory, branches, novelty=0.0, score=0.5):
+            return {
+                "state_id": state_id,
+                "objective_value": str(objective),
+                "direct_calls": str(calls),
+                "memory_ops": str(memory),
+                "branches": str(branches),
+                "novelty_score": str(novelty),
+                "final_state_score": str(score),
+                "pareto_kept": "true",
+            }
+
+        rows = [
+            row("Sscore", objective=50, calls=5, memory=5, branches=5, score=1.0),
+            row("Sobjective", objective=1, calls=5, memory=5, branches=5),
+            row("Scall", objective=50, calls=0, memory=5, branches=5),
+            row("Smemory", objective=50, calls=5, memory=0, branches=5),
+            row("Sbranch", objective=50, calls=5, memory=5, branches=0),
+            row("Snovel", objective=50, calls=5, memory=5, branches=5, novelty=1.0),
+        ]
+
+        selected = _select_diversity_preserving_beam(rows, beam_width=6)
+
+        self.assertEqual(
+            {bucket for _state_id, bucket in selected},
+            {
+                "objective_bucket",
+                "direct_call_bucket",
+                "memory_bucket",
+                "branch_bucket",
+                "novelty_bucket",
+                "score_fill",
+            },
+        )
+
+    def test_timed_validation_call_accumulates_non_overlapping_wall_time(self) -> None:
+        context = {"timing": {"batch_validation_wall_time_ms": 25.0}}
+
+        with mock.patch("phasebatch.optimizer.time.perf_counter", side_effect=[10.0, 10.125]):
+            result = _run_timed_batch_validation(context, lambda: "done")
+
+        self.assertEqual(result, "done")
+        self.assertEqual(context["timing"]["batch_validation_wall_time_ms"], 150.0)
+
+    def test_optimizer_timing_uses_actual_validation_opt_invocations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            state_dir = out_dir / "states" / "S0000"
+            state_dir.mkdir(parents=True)
+            _write_csv(
+                out_dir / "states.csv",
+                ["state_id", "state_dir", "is_duplicate"],
+                [{"state_id": "S0000", "state_dir": str(state_dir), "is_duplicate": "false"}],
+            )
+            _write_csv(
+                state_dir / "batch_validation.csv",
+                ["tested_orders", "validation_opt_invocations", "time_ms"],
+                [{"tested_orders": "10", "validation_opt_invocations": "6", "time_ms": "12.5"}],
+            )
+
+            path = _write_optimizer_timing(
+                out_dir,
+                {
+                    "program": "testprog",
+                    "timing": {"batch_validation_wall_time_ms": 7.25},
+                },
+                elapsed_ms=20.0,
+            )
+            row = _read_csv(path)[0]
+
+        self.assertEqual(row["total_opt_invocations"], "6")
+        self.assertEqual(row["batch_validation_time_ms"], "7.250")
+
     def test_optimize_batches_help_exists(self) -> None:
         repo = Path(__file__).resolve().parents[1]
         result = subprocess.run(
@@ -27,15 +138,132 @@ class OptimizerTests(unittest.TestCase):
         self.assertIn("--mode", result.stdout)
         self.assertIn("--max-rounds", result.stdout)
         self.assertIn("--max-states", result.stdout)
+        self.assertIn("--max-component-size", result.stdout)
+        self.assertIn("--max-batch-candidates", result.stdout)
         self.assertIn("--beam-width", result.stdout)
         self.assertIn("--batch-frontier-policy", result.stdout)
         self.assertIn("--batch-selection-policy", result.stdout)
         self.assertIn("--frontier-selection-policy", result.stdout)
         self.assertIn("--selection-seed", result.stdout)
         self.assertIn("--allow-sampled-batches", result.stdout)
+        self.assertIn("--allow-bounded-validation", result.stdout)
+        self.assertIn("--batch-validation-mode", result.stdout)
+        self.assertIn("--max-permutation-factorial", result.stdout)
+        self.assertIn("--max-validation-sequences", result.stdout)
+        self.assertIn("--pair-testing-mode", result.stdout)
+        self.assertIn("--pair-test-budget-per-state", result.stdout)
+        self.assertIn("--pair-priority-policy", result.stdout)
+        self.assertIn("--batch-construction-mode", result.stdout)
         self.assertIn("--exact-fail-on-incomplete", result.stdout)
+        self.assertIn("--batchify-terminal-states", result.stdout)
         self.assertIn("--run-baselines", result.stdout)
         self.assertIn("--verify-final-pipeline", result.stdout)
+        self.assertIn("--llvm-diff", result.stdout)
+        self.assertIn("--keep-ir-artifacts", result.stdout)
+
+    def test_exact_mode_rejects_on_demand_validation(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "Exact mode requires budgeted_validation_strategy=all",
+        ):
+            optimize_batches(
+                Path("input.ll"),
+                Path("out"),
+                Path("passes.yaml"),
+                mode="exact",
+                objective="ir-inst-count",
+                max_rounds=1,
+                max_batches_per_state=2,
+                budgeted_validation_strategy="on-demand",
+                validate_batches=True,
+                allow_sampled_batches=False,
+                jobs=1,
+                timeout=1,
+                max_pairs=None,
+            )
+
+    def test_optimizer_rejects_non_pairwise_batch_construction(self) -> None:
+        with self.assertRaisesRegex(ValueError, "only supports pairwise"):
+            optimize_batches(
+                Path("input.ll"),
+                Path("out"),
+                Path("passes.yaml"),
+                mode="budgeted",
+                objective="ir-inst-count",
+                max_rounds=1,
+                max_batches_per_state=2,
+                validate_batches=True,
+                allow_sampled_batches=False,
+                batch_construction_mode="experimental",
+                jobs=1,
+                timeout=1,
+                max_pairs=None,
+            )
+
+    def test_budgeted_on_demand_stops_after_enough_executable_batches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result, out_dir, _fake_analyze, attempts = _run_fake_optimizer(
+                Path(tmp),
+                validation_statuses={
+                    "B0000": "mismatch",
+                    "B0001": "all_permutations_same",
+                    "B0002": "all_permutations_same",
+                    "B0003": "all_permutations_same",
+                },
+                candidate_ids=["B0000", "B0001", "B0002", "B0003"],
+                batch_orders={
+                    "B0000": "pass-a;pass-b;pass-c",
+                    "B0001": "pass-a;pass-b",
+                    "B0002": "pass-a",
+                    "B0003": "pass-b",
+                },
+                child_instruction_counts={"B0001": 2, "B0002": 1},
+                max_rounds=1,
+                max_batches_per_state=2,
+                budgeted_validation_strategy="on-demand",
+                return_validation_attempts=True,
+            )
+            validation_rows = _read_csv(out_dir / "states" / "S0000" / "batch_validation.csv")
+            transitions = _read_csv(out_dir / "batch_state_transitions.csv")
+            optimize_summary = (out_dir / "optimize_summary.md").read_text(encoding="utf-8")
+            final_summary = (out_dir / "final_summary.md").read_text(encoding="utf-8")
+
+        self.assertEqual(attempts, ["B0000", "B0001", "B0002"])
+        self.assertEqual(
+            [row["validation_status"] for row in validation_rows],
+            ["mismatch", "all_permutations_same", "all_permutations_same", "not_validated"],
+        )
+        self.assertEqual(
+            validation_rows[3]["validation_incomplete_reason"],
+            "budgeted_on_demand_not_selected",
+        )
+        self.assertEqual([row["batch_id"] for row in transitions], ["B0001", "B0002"])
+        self.assertEqual(result["batch_transitions"], 2)
+        self.assertEqual(result["budgeted_validation_strategy"], "on-demand")
+        self.assertIn("- budgeted_validation_strategy: on-demand", optimize_summary)
+        self.assertIn("- budgeted_validation_strategy: on-demand", final_summary)
+        self.assertIn("## Validation Cost", final_summary)
+
+    def test_budgeted_validate_all_strategy_keeps_full_validation_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _result, out_dir, _fake_analyze, attempts = _run_fake_optimizer(
+                Path(tmp),
+                validation_statuses={
+                    "B0000": "mismatch",
+                    "B0001": "all_permutations_same",
+                    "B0002": "all_permutations_same",
+                    "B0003": "all_permutations_same",
+                },
+                candidate_ids=["B0000", "B0001", "B0002", "B0003"],
+                max_rounds=1,
+                max_batches_per_state=2,
+                budgeted_validation_strategy="all",
+                return_validation_attempts=True,
+            )
+            rows = _read_csv(out_dir / "states" / "S0000" / "batch_validation.csv")
+
+        self.assertEqual(attempts, ["B0000", "B0001", "B0002", "B0003"])
+        self.assertNotIn("not_validated", [row["validation_status"] for row in rows])
 
     def test_flattened_pipeline_uses_pipeline_text_and_names_are_separate(self) -> None:
         registry = PassRegistry.from_specs(
@@ -75,10 +303,13 @@ class OptimizerTests(unittest.TestCase):
             "optimized_pipeline.txt",
             "final.ll",
             "optimize_summary.md",
+            "pair_cost_summary.csv",
+            "pair_cost_summary.md",
                 ]
             }
 
         self.assertEqual(result["selected_final_state"], "S0002")
+        self.assertTrue(result["pair_cost_summary_csv"].endswith("pair_cost_summary.csv"))
         for name, exists in output_exists.items():
             self.assertTrue(exists, name)
         self.assertEqual([row["state_id"] for row in states], ["S0000", "S0001", "S0002"])
@@ -88,6 +319,26 @@ class OptimizerTests(unittest.TestCase):
         self.assertEqual(chosen[0]["ir_inst_delta"], "-2")
         self.assertEqual(pipeline, "pass-c")
         self.assertIn("Objective is used only for path selection, not as commutation proof.", summary)
+
+    def test_optimize_batches_passes_batcher_limits_and_records_them(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _result, out_dir, _fake_analyze, fake_build = _run_fake_optimizer(
+                Path(tmp),
+                validation_statuses={"B0000": "all_permutations_same"},
+                candidate_ids=["B0000"],
+                child_instruction_counts={"B0000": 1},
+                max_component_size=17,
+                max_batch_candidates=23,
+                return_build_mock=True,
+            )
+
+            summary = (out_dir / "optimize_summary.md").read_text(encoding="utf-8")
+
+        build_kwargs = fake_build.call_args.kwargs
+        self.assertEqual(build_kwargs["max_component_size"], 17)
+        self.assertEqual(build_kwargs["max_batch_candidates"], 23)
+        self.assertIn("- max_component_size: 17", summary)
+        self.assertIn("- max_batch_candidates: 23", summary)
 
     def test_rejected_and_failed_batches_are_not_executed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -131,6 +382,35 @@ class OptimizerTests(unittest.TestCase):
         self.assertEqual(result["batch_transitions"], 1)
         self.assertEqual(allowed_transitions[0]["correctness_class"], "sampled_batch")
 
+    def test_bounded_batches_require_allow_bounded_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result, out_dir, _fake_analyze = _run_fake_optimizer(
+                Path(tmp) / "default",
+                validation_statuses={"B0000": "bounded_same"},
+                candidate_ids=["B0000"],
+                child_instruction_counts={"B0000": 1},
+                allow_bounded_validation=False,
+            )
+            default_transitions = _read_csv(out_dir / "batch_state_transitions.csv")
+
+        self.assertEqual(result["batch_transitions"], 0)
+        self.assertEqual(default_transitions, [])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result, out_dir, _fake_analyze = _run_fake_optimizer(
+                Path(tmp) / "allowed",
+                validation_statuses={"B0000": "bounded_same"},
+                candidate_ids=["B0000"],
+                child_instruction_counts={"B0000": 1},
+                allow_bounded_validation=True,
+            )
+            allowed_transitions = _read_csv(out_dir / "batch_state_transitions.csv")
+            correctness = _read_csv(out_dir / "states" / "S0000" / "batch_correctness.csv")
+
+        self.assertEqual(result["batch_transitions"], 1)
+        self.assertEqual(allowed_transitions[0]["correctness_class"], "bounded_batch")
+        self.assertEqual(correctness[0]["can_hard_fold"], "false")
+
     def test_duplicate_child_states_are_merged_by_hash(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             result, out_dir, fake_analyze = _run_fake_optimizer(
@@ -154,6 +434,26 @@ class OptimizerTests(unittest.TestCase):
         self.assertEqual(chosen[0]["duplicate_of"], "S0001")
         self.assertEqual(Path(chosen[0]["child_ir_path"]).name, "input.ll")
         self.assertIn(str(Path("states") / "S0001" / "input.ll"), chosen[0]["child_ir_path"])
+
+    def test_structurally_equal_hash_different_states_are_not_merged(self) -> None:
+        left = "define i32 @f(i32 %x) {\n  %a = add i32 %x, 0\n  ret i32 %a\n}\n"
+        right = "define i32 @f(i32 %x) {\n  %b = add i32 %x, 0\n  ret i32 %b\n}\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            result, out_dir, fake_analyze = _run_fake_optimizer(
+                Path(tmp),
+                validation_statuses={"B0000": "all_permutations_same", "B0001": "all_permutations_same"},
+                candidate_ids=["B0000", "B0001"],
+                child_ir_texts={"B0000": left, "B0001": right},
+            )
+
+            states = _read_csv(out_dir / "states.csv")
+            dag = _read_csv(out_dir / "state_dag.csv")
+
+        self.assertEqual(result["duplicate_states"], 0)
+        self.assertEqual(fake_analyze.call_count, 3)
+        self.assertEqual([row["is_duplicate"] for row in states], ["false", "false", "false"])
+        self.assertNotEqual(states[1]["state_hash"], states[2]["state_hash"])
+        self.assertEqual([row["is_duplicate"] for row in dag], ["false", "false"])
 
     def test_budgeted_max_rounds_two_creates_depth_two_states(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -435,6 +735,12 @@ class OptimizerTests(unittest.TestCase):
             "effect_changed_count_from_parent",
             "parent_gain",
             "objective_score",
+            "direct_call_score",
+            "memory_score",
+            "branch_score",
+            "direct_calls",
+            "memory_ops",
+            "branches",
             "future_potential_score",
             "evidence_quality_score",
             "novelty_score",
@@ -582,6 +888,9 @@ class OptimizerTests(unittest.TestCase):
             summary = (out_dir / "optimize_summary.md").read_text(encoding="utf-8")
 
         self.assertIn("## Frontier Selection Policy", summary)
+        self.assertIn("## Equality Tier Summary", summary)
+        self.assertIn("| tier | count | hard_fold |", summary)
+        self.assertIn("| structural_diff | 2 | 2 |", summary)
         self.assertIn("## Correctness Boundary", summary)
         self.assertIn(
             "Batch correctness is based on certified canonical-IR equality or explicit validation status. Objective scores are used only for search ranking and final path selection; they are not used as commutation or independence proof.",
@@ -638,7 +947,29 @@ class OptimizerTests(unittest.TestCase):
         self.assertEqual(result["batch_transitions"], 0)
         self.assertEqual(transitions, [])
         self.assertEqual(fake_analyze.call_count, 1)
-        self.assertEqual(leaves[0]["leaf_reason"], "no_executable_batches")
+        self.assertEqual(leaves[0]["leaf_reason"], "exact_incomplete")
+        self.assertEqual(result["exact_status"], "exact_incomplete")
+        self.assertIn("non_certified_batch_validation:S0000", result["exact_incomplete_reasons"])
+
+    def test_exact_mode_does_not_execute_bounded_batches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result, out_dir, fake_analyze = _run_fake_exact_optimizer(
+                Path(tmp),
+                candidate_ids_by_state={"S0000": ["B0000"]},
+                validation_statuses={("S0000", "B0000"): "bounded_same"},
+                child_instruction_counts={("S0000", "B0000"): 1},
+                max_rounds=1,
+            )
+
+            transitions = _read_csv(out_dir / "batch_state_transitions.csv")
+            leaves = _read_csv(out_dir / "leaf_states.csv")
+
+        self.assertEqual(result["batch_transitions"], 0)
+        self.assertEqual(transitions, [])
+        self.assertEqual(fake_analyze.call_count, 1)
+        self.assertEqual(leaves[0]["leaf_reason"], "exact_incomplete")
+        self.assertEqual(result["exact_status"], "exact_incomplete")
+        self.assertIn("non_certified_batch_validation:S0000", result["exact_incomplete_reasons"])
 
     def test_exact_mode_rejects_allow_sampled_batches_configuration(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -682,6 +1013,78 @@ class OptimizerTests(unittest.TestCase):
 
         self.assertEqual(result["exact_status"], "exact_incomplete")
         self.assertIn("unresolved_components:S0000", status_text)
+
+    def test_exact_mode_marks_incomplete_when_pair_testing_hits_max_pairs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result, out_dir, _fake_analyze = _run_fake_exact_optimizer(
+                Path(tmp),
+                candidate_ids_by_state={"S0000": ["B0000"]},
+                validation_statuses={("S0000", "B0000"): "all_permutations_same"},
+                child_instruction_counts={("S0000", "B0000"): 1},
+                max_pairs_truncated_states={"S0000"},
+                max_rounds=1,
+            )
+
+            status_text = (out_dir / "exact_status.txt").read_text(encoding="utf-8")
+            summary = (out_dir / "optimize_summary.md").read_text(encoding="utf-8")
+
+        self.assertEqual(result["exact_status"], "exact_incomplete")
+        self.assertIn("pair_relation_incomplete_max_pairs:S0000", result["exact_incomplete_reasons"])
+        self.assertIn("pair_relation_incomplete_max_pairs:S0000", status_text)
+        self.assertIn("pair_relation_incomplete_max_pairs:S0000", summary)
+
+    def test_exact_mode_marks_incomplete_when_lazy_pair_budget_skips_pairs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result, out_dir, _fake_analyze = _run_fake_exact_optimizer(
+                Path(tmp),
+                candidate_ids_by_state={"S0000": ["B0000"]},
+                validation_statuses={("S0000", "B0000"): "all_permutations_same"},
+                child_instruction_counts={("S0000", "B0000"): 1},
+                lazy_budget_states={"S0000"},
+                pair_testing_mode="lazy",
+                pair_test_budget_per_state=1,
+                max_rounds=1,
+            )
+
+            status_text = (out_dir / "exact_status.txt").read_text(encoding="utf-8")
+            transitions = _read_csv(out_dir / "batch_state_transitions.csv")
+
+        self.assertEqual(result["exact_status"], "exact_incomplete")
+        self.assertIn("pair_relation_incomplete_lazy_budget:S0000", result["exact_incomplete_reasons"])
+        self.assertIn("pair_relation_incomplete_lazy_budget:S0000", status_text)
+        self.assertEqual(transitions, [])
+
+    def test_exact_mode_batchifies_terminal_frontier_without_applying_batches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result, out_dir, _fake_analyze = _run_fake_exact_optimizer(
+                Path(tmp),
+                candidate_ids_by_state={"S0000": ["B0000"], "S0001": ["B0000"]},
+                validation_statuses={("S0000", "B0000"): "all_permutations_same", ("S0001", "B0000"): "all_permutations_same"},
+                child_instruction_counts={("S0000", "B0000"): 1, ("S0001", "B0000"): 0},
+                max_rounds=1,
+            )
+
+            terminal_dir = out_dir / "states" / "S0001"
+            states = _read_csv(out_dir / "states.csv")
+            transitions = _read_csv(out_dir / "batch_state_transitions.csv")
+            terminal_summary = _read_csv(terminal_dir / "batch_summary.csv")
+            terminal_correctness = _read_csv(terminal_dir / "batch_correctness.csv")
+            terminal_coverage_exists = (terminal_dir / "coverage_summary.csv").exists()
+            summary = (out_dir / "optimize_summary.md").read_text(encoding="utf-8")
+
+        self.assertEqual(result["selected_final_state"], "S0001")
+        self.assertEqual([row["state_id"] for row in states], ["S0000", "S0001"])
+        self.assertEqual(len(transitions), 1)
+        self.assertTrue(terminal_coverage_exists)
+        self.assertEqual(terminal_summary[0]["batch_candidates"], "1")
+        self.assertEqual(terminal_correctness[0]["can_execute"], "true")
+        self.assertEqual(result["selected_final_state_truncated"], "true")
+        self.assertEqual(result["remaining_active_passes"], "root-a;child-a")
+        self.assertEqual(result["remaining_executable_batches"], "B0000")
+        self.assertIn("- batchify_terminal_states: true", summary)
+        self.assertIn("- selected_final_state_truncated: true", summary)
+        self.assertIn("- remaining_active_passes: root-a;child-a", summary)
+        self.assertIn("- remaining_executable_batches: B0000", summary)
 
     def test_exact_mode_marks_incomplete_when_state_cap_exceeded(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -778,6 +1181,77 @@ class OptimizerTests(unittest.TestCase):
         self.assertIn("## Final Pipeline Replay Verification", optimize_summary)
         self.assertIn("replay_status: success", optimize_summary)
 
+    def test_optimize_batches_writes_equality_tier_summary_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result, out_dir, _fake_analyze = _run_fake_optimizer(
+                Path(tmp),
+                validation_statuses={"B0000": "all_permutations_same"},
+                candidate_ids=["B0000"],
+                child_instruction_counts={"B0000": 1},
+                verify_final_pipeline=False,
+            )
+
+            csv_path = out_dir / "equality_tier_summary.csv"
+            md_path = out_dir / "equality_tier_summary.md"
+            rows = _read_csv(csv_path)
+            markdown = md_path.read_text(encoding="utf-8")
+
+        self.assertEqual(result["equality_tier_summary_csv"], str(csv_path))
+        self.assertEqual(result["equality_tier_summary_md"], str(md_path))
+        self.assertTrue(rows)
+        self.assertIn("# Equality Tier Summary", markdown)
+
+    def test_budgeted_lazy_pair_testing_records_pair_scheduling_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result, out_dir, _fake_analyze = _run_fake_optimizer(
+                Path(tmp),
+                validation_statuses={"B0000": "all_permutations_same"},
+                candidate_ids=["B0000"],
+                child_instruction_counts={"B0000": 1},
+                pair_testing_mode="lazy",
+                pair_test_budget_per_state=1,
+            )
+
+            rows = _read_csv(out_dir / "pair_scheduling_summary.csv")
+            markdown = (out_dir / "pair_scheduling_summary.md").read_text(encoding="utf-8")
+
+        self.assertEqual(result["pair_scheduling_summary_csv"], str(out_dir / "pair_scheduling_summary.csv"))
+        self.assertTrue(rows)
+        self.assertTrue(any(row["pair_testing_mode"] == "lazy" for row in rows))
+        self.assertIn("Lazy pair testing can reduce cost", markdown)
+
+    def test_optimize_batches_cleans_ir_artifacts_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result, out_dir, _fake_analyze = _run_fake_optimizer(
+                Path(tmp),
+                validation_statuses={"B0000": "all_permutations_same"},
+                candidate_ids=["B0000"],
+                child_instruction_counts={"B0000": 1},
+                keep_ir_artifacts=None,
+            )
+
+            remaining_ll = list(out_dir.rglob("*.ll"))
+
+        self.assertEqual(result["ir_artifacts_cleaned"], "true")
+        self.assertGreater(int(result["deleted_ir_artifacts"]), 0)
+        self.assertEqual(remaining_ll, [])
+
+    def test_optimize_batches_can_keep_ir_artifacts_for_postprocessing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result, out_dir, fake_analyze = _run_fake_optimizer(
+                Path(tmp),
+                validation_statuses={"B0000": "all_permutations_same"},
+                candidate_ids=["B0000"],
+                child_instruction_counts={"B0000": 1},
+                keep_ir_artifacts=True,
+            )
+
+            remaining_ll = list(out_dir.rglob("*.ll"))
+
+        self.assertEqual(result["ir_artifacts_cleaned"], "false")
+        self.assertTrue(remaining_ll)
+        self.assertTrue(fake_analyze.call_args_list[0].args[2]["_keep_ir_artifacts"])
+
 
 def _run_fake_optimizer(
     root: Path,
@@ -785,22 +1259,33 @@ def _run_fake_optimizer(
     validation_statuses: dict,
     mode: str = "budgeted",
     child_instruction_counts: dict | None = None,
+    child_ir_texts: dict | None = None,
     candidate_ids: list[str] | None = None,
     candidate_ids_by_state: dict[str, list[str]] | None = None,
     batch_orders: dict | None = None,
     unresolved_states: set[str] | None = None,
     truncated_states: set[str] | None = None,
     allow_sampled_batches: bool = False,
+    allow_bounded_validation: bool = False,
     max_rounds: int = 1,
     beam_width: int = 8,
     max_states: int = 5000,
     max_batches_per_state: int = 20,
+    budgeted_validation_strategy: str = "all",
+    max_component_size: int = 10,
+    max_batch_candidates: int = 200,
     batch_frontier_policy: str | None = None,
     batch_selection_policy: str | None = None,
     frontier_selection_policy: str | None = None,
     selection_seed: int = 0,
     run_baselines: bool = False,
     verify_final_pipeline: bool = False,
+    keep_ir_artifacts: bool | None = True,
+    pair_testing_mode: str = "full",
+    pair_test_budget_per_state: int = 0,
+    pair_priority_policy: str = "mixed",
+    return_build_mock: bool = False,
+    return_validation_attempts: bool = False,
 ):
     root.mkdir(parents=True, exist_ok=True)
     input_path = root / "input.ll"
@@ -812,9 +1297,11 @@ def _run_fake_optimizer(
     candidate_ids = candidate_ids or ["B0000", "B0001"]
     candidate_ids_by_state = candidate_ids_by_state or {"S0000": candidate_ids}
     child_instruction_counts = child_instruction_counts or {}
+    child_ir_texts = child_ir_texts or {}
     batch_orders = batch_orders or {}
     unresolved_states = unresolved_states or set()
     truncated_states = truncated_states or set()
+    validation_attempts: list[str] = []
 
     def fake_prepare(src, out, tools, timeout):
         out.mkdir(parents=True, exist_ok=True)
@@ -837,6 +1324,7 @@ def _run_fake_optimizer(
         depth,
         parent_state_id,
         transition_pass,
+        **_pair_scheduling_kwargs,
     ):
         state_dir = Path(state_dir)
         state_dir.mkdir(parents=True, exist_ok=True)
@@ -889,8 +1377,36 @@ def _run_fake_optimizer(
         )
         _write_csv(
             state_dir / "pair_relation.csv",
-            ["program", "state_id", "pass_a", "pass_b", "final_relation"],
-            [{"program": program, "state_id": state_id, "pass_a": "pass-a", "pass_b": "pass-b", "final_relation": "final_commute"}],
+            [
+                "program",
+                "state_id",
+                "pass_a",
+                "pass_b",
+                "dynamic_relation",
+                "final_relation",
+                "failure_kind",
+                "equality_tier",
+                "can_hard_fold",
+                "pair_testing_mode",
+                "skipped_by_budget",
+                "cache_hit",
+            ],
+            [
+                {
+                    "program": program,
+                    "state_id": state_id,
+                    "pass_a": "pass-a",
+                    "pass_b": "pass-b",
+                    "dynamic_relation": "not_tested" if pair_testing_mode == "lazy" else "dynamic_commute",
+                    "final_relation": "final_unknown" if pair_testing_mode == "lazy" else "final_commute",
+                    "failure_kind": "lazy_budget" if pair_testing_mode == "lazy" else "",
+                    "equality_tier": "failed" if pair_testing_mode == "lazy" else "structural_diff",
+                    "can_hard_fold": "false" if pair_testing_mode == "lazy" else "true",
+                    "pair_testing_mode": pair_testing_mode,
+                    "skipped_by_budget": "true" if pair_testing_mode == "lazy" else "false",
+                    "cache_hit": "false",
+                }
+            ],
         )
         _write_csv(
             state_dir / "per_state_summary.csv",
@@ -1015,11 +1531,33 @@ def _run_fake_optimizer(
         )
         return {"batch_candidates": len(rows), "truncated": state_id in truncated_states}
 
-    def fake_validate_batch_candidates(state_dir, tools, timeout, jobs):
+    def fake_validate_batch_candidates(state_dir, tools, timeout, jobs, candidate_ids=None, runtime=None):
+        del runtime
         rows = []
         state_dir = Path(state_dir)
+        selected_ids = None if candidate_ids is None else set(candidate_ids)
+        existing_by_id = {
+            row.get("batch_id", ""): row
+            for row in _read_csv(state_dir / "batch_validation.csv")
+            if row.get("batch_id")
+        } if (state_dir / "batch_validation.csv").exists() else {}
         for candidate in _read_csv(state_dir / "batch_candidates.csv"):
             key = (candidate.get("state_id", ""), candidate.get("batch_id", ""))
+            batch_id = candidate.get("batch_id", "")
+            existing = existing_by_id.get(batch_id)
+            if existing and not (
+                existing.get("validation_status") == "not_validated"
+                and existing.get("validation_incomplete_reason") == "budgeted_on_demand_not_selected"
+            ):
+                rows.append(existing)
+                continue
+            if selected_ids is not None and batch_id not in selected_ids:
+                status = "not_validated"
+                incomplete_reason = "budgeted_on_demand_not_selected"
+            else:
+                validation_attempts.append(batch_id)
+                status = validation_statuses.get(key, validation_statuses.get(batch_id, "not_validated"))
+                incomplete_reason = ""
             rows.append(
                 {
                     "program": candidate.get("program", ""),
@@ -1031,7 +1569,11 @@ def _run_fake_optimizer(
                     "tested_orders": "1",
                     "same_hash_count": "1",
                     "different_hash_count": "0",
-                    "validation_status": validation_statuses.get(key, validation_statuses.get(candidate.get("batch_id", ""), "not_validated")),
+                    "validation_status": status,
+                    "validation_tier": "exhaustive_all_permutations" if status == "all_permutations_same" else "unvalidated",
+                    "validation_complete": "true" if status == "all_permutations_same" else "false",
+                    "validation_hard_certificate": "true" if status == "all_permutations_same" else "false",
+                    "validation_incomplete_reason": incomplete_reason,
                     "canonical_hash": "hash",
                     "first_mismatch_order": "",
                     "first_mismatch_hash": "",
@@ -1045,40 +1587,54 @@ def _run_fake_optimizer(
         out = Path(out)
         parent_state = out.parents[2].name
         batch_id = out.stem.split("_")[-1]
-        count = child_instruction_counts.get((parent_state, batch_id), child_instruction_counts.get(batch_id, 2))
-        out.write_text(_ir_with_instruction_count(count), encoding="utf-8")
+        text = child_ir_texts.get((parent_state, batch_id), child_ir_texts.get(batch_id))
+        if text is None:
+            count = child_instruction_counts.get((parent_state, batch_id), child_instruction_counts.get(batch_id, 2))
+            text = _ir_with_instruction_count(count)
+        out.write_text(text, encoding="utf-8")
         return RunResult([opt], 0, "", "", 1.0)
 
     with mock.patch("phasebatch.optimizer.collect_toolchain", return_value={"tools": {"clang": {"path": "clang"}, "opt": {"path": "opt"}}}), \
         mock.patch("phasebatch.optimizer.prepare_input_ir", side_effect=fake_prepare), \
         mock.patch("phasebatch.optimizer.validate_passes", return_value=(["pass-a", "pass-b", "pass-c"], [])), \
         mock.patch("phasebatch.optimizer.analyze_state", side_effect=fake_analyze_state) as fake_analyze, \
-        mock.patch("phasebatch.optimizer.build_batch_family", side_effect=fake_build_batch_family), \
+        mock.patch("phasebatch.optimizer.build_batch_family", side_effect=fake_build_batch_family) as fake_build, \
         mock.patch("phasebatch.optimizer.validate_batch_candidates", side_effect=fake_validate_batch_candidates), \
         mock.patch("phasebatch.optimizer.run_opt", side_effect=fake_run_opt):
-        result = optimize_batches(
-            input_path,
-            out_dir,
-            passes_path,
-            mode=mode,
-            objective="ir-inst-count",
-            max_rounds=max_rounds,
-            max_batches_per_state=max_batches_per_state,
-            beam_width=beam_width,
-            max_states=max_states,
-            batch_frontier_policy=batch_frontier_policy,
-            batch_selection_policy=batch_selection_policy,
-            frontier_selection_policy=frontier_selection_policy,
-            selection_seed=selection_seed,
-            validate_batches=True,
-            allow_sampled_batches=allow_sampled_batches,
-            jobs=1,
-            timeout=1,
-            max_pairs=10,
-            run_baselines=run_baselines,
-            verify_final_pipeline=verify_final_pipeline,
-        )
+        optimize_kwargs = {
+            "mode": mode,
+            "objective": "ir-inst-count",
+            "max_rounds": max_rounds,
+            "max_batches_per_state": max_batches_per_state,
+            "budgeted_validation_strategy": budgeted_validation_strategy,
+            "max_component_size": max_component_size,
+            "max_batch_candidates": max_batch_candidates,
+            "beam_width": beam_width,
+            "max_states": max_states,
+            "batch_frontier_policy": batch_frontier_policy,
+            "batch_selection_policy": batch_selection_policy,
+            "frontier_selection_policy": frontier_selection_policy,
+            "selection_seed": selection_seed,
+            "validate_batches": True,
+            "allow_sampled_batches": allow_sampled_batches,
+            "allow_bounded_validation": allow_bounded_validation,
+            "jobs": 1,
+            "timeout": 1,
+            "max_pairs": 10,
+            "run_baselines": run_baselines,
+            "verify_final_pipeline": verify_final_pipeline,
+            "pair_testing_mode": pair_testing_mode,
+            "pair_test_budget_per_state": pair_test_budget_per_state,
+            "pair_priority_policy": pair_priority_policy,
+        }
+        if keep_ir_artifacts is not None:
+            optimize_kwargs["keep_ir_artifacts"] = keep_ir_artifacts
+        result = optimize_batches(input_path, out_dir, passes_path, **optimize_kwargs)
 
+    if return_build_mock:
+        return result, out_dir, fake_analyze, fake_build
+    if return_validation_attempts:
+        return result, out_dir, fake_analyze, validation_attempts
     return result, out_dir, fake_analyze
 
 
@@ -1090,7 +1646,14 @@ def _run_fake_exact_optimizer(
     child_instruction_counts: dict[tuple[str, str], int] | None = None,
     truncated_states: set[str] | None = None,
     unresolved_states: set[str] | None = None,
+    max_pairs_truncated_states: set[str] | None = None,
+    lazy_budget_states: set[str] | None = None,
     allow_sampled_batches: bool = False,
+    allow_bounded_validation: bool = False,
+    pair_testing_mode: str = "full",
+    pair_test_budget_per_state: int = 0,
+    pair_priority_policy: str = "mixed",
+    batchify_terminal_states: bool = True,
     max_rounds: int = 1,
     max_states: int = 5000,
 ):
@@ -1104,6 +1667,8 @@ def _run_fake_exact_optimizer(
     child_instruction_counts = child_instruction_counts or {}
     truncated_states = truncated_states or set()
     unresolved_states = unresolved_states or set()
+    max_pairs_truncated_states = max_pairs_truncated_states or set()
+    lazy_budget_states = lazy_budget_states or set()
 
     def fake_prepare(src, out, tools, timeout):
         out.mkdir(parents=True, exist_ok=True)
@@ -1126,6 +1691,7 @@ def _run_fake_exact_optimizer(
         depth,
         parent_state_id,
         transition_pass,
+        **_pair_scheduling_kwargs,
     ):
         state_dir = Path(state_dir)
         state_dir.mkdir(parents=True, exist_ok=True)
@@ -1177,9 +1743,24 @@ def _run_fake_exact_optimizer(
                 },
             ],
         )
+        lazy_budget = state_id in lazy_budget_states
+        max_pairs_truncated = state_id in max_pairs_truncated_states
         _write_csv(
             state_dir / "pair_relation.csv",
-            ["program", "state_id", "state_hash", "pass_a", "pass_b", "final_relation"],
+            [
+                "program",
+                "state_id",
+                "state_hash",
+                "pass_a",
+                "pass_b",
+                "dynamic_relation",
+                "failure_kind",
+                "final_relation",
+                "equality_tier",
+                "can_hard_fold",
+                "pair_testing_mode",
+                "skipped_by_budget",
+            ],
             [
                 {
                     "program": program,
@@ -1187,7 +1768,13 @@ def _run_fake_exact_optimizer(
                     "state_hash": f"{state_id}-hash",
                     "pass_a": "root-a",
                     "pass_b": "child-a",
-                    "final_relation": "final_commute",
+                    "dynamic_relation": "not_tested" if (max_pairs_truncated or lazy_budget) else "dynamic_commute",
+                    "failure_kind": "lazy_budget" if lazy_budget else ("max_pairs" if max_pairs_truncated else ""),
+                    "final_relation": "final_unknown" if (max_pairs_truncated or lazy_budget) else "final_commute",
+                    "equality_tier": "failed" if (max_pairs_truncated or lazy_budget) else "canonical_hash",
+                    "can_hard_fold": "false" if (max_pairs_truncated or lazy_budget) else "true",
+                    "pair_testing_mode": "lazy" if lazy_budget else pair_testing_mode,
+                    "skipped_by_budget": "true" if lazy_budget else "false",
                 }
             ],
         )
@@ -1392,10 +1979,15 @@ def _run_fake_exact_optimizer(
             max_batches_per_state=20,
             validate_batches=True,
             allow_sampled_batches=allow_sampled_batches,
+            allow_bounded_validation=allow_bounded_validation,
+            pair_testing_mode=pair_testing_mode,
+            pair_test_budget_per_state=pair_test_budget_per_state,
+            pair_priority_policy=pair_priority_policy,
             jobs=1,
             timeout=1,
             max_pairs=10,
             max_states=max_states,
+            batchify_terminal_states=batchify_terminal_states,
             verify_final_pipeline=False,
         )
 

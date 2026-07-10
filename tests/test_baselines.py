@@ -5,11 +5,19 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from phasebatch.baselines import compare_baselines, run_greedy_single_pass_baseline, run_random_single_pass_baseline
+from phasebatch.baselines import compare_baselines, run_greedy_single_pass_baseline, run_opt_raw_pipeline, run_random_single_pass_baseline
 from phasebatch.schema import RunResult
 
 
 class BaselineComparisonTests(unittest.TestCase):
+    def test_raw_default_pipeline_dispatches_through_shared_backend(self) -> None:
+        expected = RunResult(["worker"], 0, "", "", 1.0, backend="worker")
+        with mock.patch("phasebatch.baselines.run_opt", return_value=expected) as run:
+            result = run_opt_raw_pipeline("opt", Path("input.ll"), "default<O2>", Path("out.ll"), 9)
+
+        self.assertIs(result, expected)
+        run.assert_called_once_with("opt", Path("input.ll"), ["default<O2>"], Path("out.ll"), 9)
+
     def test_root_baseline_equals_root_ir_instruction_count(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run_dir, passes_path = _make_run(Path(tmp), root_count=4)

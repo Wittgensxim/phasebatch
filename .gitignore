@@ -2,7 +2,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-.pytest_cache/
+.pytest_cache*/
 .mypy_cache/
 .ruff_cache/
 .coverage
@@ -21,6 +21,7 @@ outputs/*
 
 # Local paper copy used for reference; do not publish third-party PDFs.
 cgo.2006.15.pdf
+scripts.zip
 
 dist/
 build/

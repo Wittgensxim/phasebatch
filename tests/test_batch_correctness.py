@@ -28,10 +28,38 @@ class BatchCorrectnessTests(unittest.TestCase):
         self.assertEqual(rows[0]["can_hard_fold"], "false")
         self.assertEqual(rows[0]["can_execute"], "true")
 
+    def test_bounded_same_is_not_executable_by_default(self) -> None:
+        rows = _classify_one("bounded_same", validation_tier="bounded_insertion")
+
+        self.assertEqual(rows[0]["correctness_class"], "bounded_batch")
+        self.assertEqual(rows[0]["can_hard_fold"], "false")
+        self.assertEqual(rows[0]["can_execute"], "false")
+
+    def test_bounded_same_can_execute_when_explicitly_allowed_but_not_hard_fold(self) -> None:
+        rows = _classify_one("bounded_same", validation_tier="bounded_insertion", allow_bounded_validation=True)
+
+        self.assertEqual(rows[0]["correctness_class"], "bounded_batch")
+        self.assertEqual(rows[0]["can_hard_fold"], "false")
+        self.assertEqual(rows[0]["can_execute"], "true")
+
     def test_mismatch_is_rejected(self) -> None:
         rows = _classify_one("mismatch")
 
         self.assertEqual(rows[0]["correctness_class"], "rejected_batch")
+        self.assertEqual(rows[0]["can_execute"], "false")
+
+    def test_permutation_dag_exact_is_certified_when_hard_certificate_is_true(self) -> None:
+        rows = _classify_one("all_permutations_same", validation_tier="permutation_dag_exact", validation_hard_certificate="true")
+
+        self.assertEqual(rows[0]["correctness_class"], "certified_batch")
+        self.assertEqual(rows[0]["can_hard_fold"], "true")
+        self.assertEqual(rows[0]["can_execute"], "true")
+
+    def test_permutation_dag_incomplete_is_unvalidated(self) -> None:
+        rows = _classify_one("incomplete", validation_tier="permutation_dag_incomplete")
+
+        self.assertEqual(rows[0]["correctness_class"], "unvalidated_batch")
+        self.assertEqual(rows[0]["can_hard_fold"], "false")
         self.assertEqual(rows[0]["can_execute"], "false")
 
     def test_missing_validation_file_marks_all_batches_unvalidated(self) -> None:
@@ -48,12 +76,22 @@ class BatchCorrectnessTests(unittest.TestCase):
         self.assertEqual(written, rows)
 
 
-def _classify_one(status: str, allow_sampled_batches: bool = False) -> list[dict[str, str]]:
+def _classify_one(
+    status: str,
+    allow_sampled_batches: bool = False,
+    validation_tier: str = "",
+    allow_bounded_validation: bool = False,
+    validation_hard_certificate: str = "false",
+) -> list[dict[str, str]]:
     with tempfile.TemporaryDirectory() as tmp:
         state_dir = Path(tmp)
         _write_candidates(state_dir)
-        _write_validation(state_dir, status)
-        return classify_batch_correctness(state_dir, allow_sampled_batches=allow_sampled_batches)
+        _write_validation(state_dir, status, validation_tier=validation_tier, validation_hard_certificate=validation_hard_certificate)
+        return classify_batch_correctness(
+            state_dir,
+            allow_sampled_batches=allow_sampled_batches,
+            allow_bounded_validation=allow_bounded_validation,
+        )
 
 
 def _write_candidates(state_dir: Path) -> None:
@@ -90,7 +128,7 @@ def _write_candidates(state_dir: Path) -> None:
     )
 
 
-def _write_validation(state_dir: Path, status: str) -> None:
+def _write_validation(state_dir: Path, status: str, validation_tier: str = "", validation_hard_certificate: str = "false") -> None:
     _write_csv(
         state_dir / "batch_validation.csv",
         [
@@ -104,6 +142,8 @@ def _write_validation(state_dir: Path, status: str) -> None:
             "same_hash_count",
             "different_hash_count",
             "validation_status",
+            "validation_tier",
+            "validation_hard_certificate",
             "canonical_hash",
             "first_mismatch_order",
             "first_mismatch_hash",
@@ -121,6 +161,8 @@ def _write_validation(state_dir: Path, status: str) -> None:
                 "same_hash_count": "2",
                 "different_hash_count": "0",
                 "validation_status": status,
+                "validation_tier": validation_tier,
+                "validation_hard_certificate": validation_hard_certificate,
                 "canonical_hash": "hash",
                 "first_mismatch_order": "",
                 "first_mismatch_hash": "",

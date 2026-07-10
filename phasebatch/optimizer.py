@@ -2,22 +2,28 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import json
 import math
 import shutil
 import time
 from pathlib import Path
 
+from .artifact_cleanup import cleanup_ir_artifacts, mark_ir_artifacts_kept
 from .batch_correctness import classify_batch_correctness
+from .batch_validation_ladder import write_batch_validation_ladder_summary
 from .batch_objective import count_ir_instructions
 from .batcher import build_batch_family, validate_batch_candidates
-from .cli import analyze_state
 from .coverage import build_coverage_report
-from .normalizer import canonical_hash
+from .equality_summary import equality_tier_markdown, equality_tier_summary_for_run, write_equality_tier_summary
+from .normalizer import canonical_hash, count_ir_features
+from .pair_scheduling import write_pair_scheduling_summary
 from .pass_config import PassRegistry, load_pass_registry, resolve_pipeline_sequence
 from .profiler import validate_passes
 from .runner import prepare_input_ir, run_opt
 from .schema import STATE_FIELDS
+from .state_analysis import analyze_state
 from .tools import collect_toolchain, write_metadata
+from .validation_runtime import ValidationRuntime
 
 
 STATE_DAG_FIELDS = [
@@ -139,6 +145,12 @@ FRONTIER_SCORE_FIELDS = [
     "child_inst_count",
     "parent_gain",
     "objective_score",
+    "direct_calls",
+    "memory_ops",
+    "branches",
+    "direct_call_score",
+    "memory_score",
+    "branch_score",
     "future_potential_score",
     "evidence_quality_score",
     "novelty_score",
@@ -204,11 +216,27 @@ def optimize_batches(
     max_rounds: int,
     beam_width: int = 8,
     max_batches_per_state: int,
+    budgeted_validation_strategy: str = "all",
+    max_component_size: int = 10,
+    max_batch_candidates: int = 200,
+    batchify_terminal_states: bool = True,
     validate_batches: bool,
     allow_sampled_batches: bool,
+    allow_bounded_validation: bool = False,
+    batch_validation_mode: str = "auto",
+    max_permutation_factorial: int = 120,
+    max_validation_sequences: int = 200,
+    max_validation_dag_nodes: int = 5000,
+    max_validation_dag_edges: int = 20000,
+    dump_validation_dag: bool = False,
+    validation_dag_selected_only: bool = False,
     jobs: int,
     timeout: int,
     max_pairs: int | None,
+    pair_testing_mode: str = "full",
+    pair_test_budget_per_state: int = 0,
+    pair_priority_policy: str = "mixed",
+    batch_construction_mode: str = "pairwise",
     max_states: int = 2000,
     batch_frontier_policy: str | None = None,
     batch_selection_policy: str | None = None,
@@ -217,6 +245,9 @@ def optimize_batches(
     exact_fail_on_incomplete: bool = True,
     run_baselines: bool = False,
     verify_final_pipeline: bool = True,
+    llvm_diff: Path | None = None,
+    keep_ir_artifacts: bool = False,
+    root_ir_mode: str = "legacy-o0",
 ) -> dict:
     optimizer_start = time.perf_counter()
     if objective != "ir-inst-count":
@@ -233,6 +264,20 @@ def optimize_batches(
             raise ValueError(f"unknown {name} policy: {policy}")
     if mode == "exact" and allow_sampled_batches:
         raise ValueError("Exact mode does not allow sampled batches.")
+    if mode == "exact" and allow_bounded_validation:
+        raise ValueError("Exact mode does not allow bounded validation execution.")
+    if budgeted_validation_strategy not in {"all", "on-demand"}:
+        raise ValueError(f"unknown budgeted validation strategy: {budgeted_validation_strategy}")
+    if mode == "exact" and budgeted_validation_strategy != "all":
+        raise ValueError("Exact mode requires budgeted_validation_strategy=all.")
+    if batch_validation_mode not in {"auto", "exhaustive", "dag", "bounded", "sampled"}:
+        raise ValueError(f"unknown batch validation mode: {batch_validation_mode}")
+    if pair_testing_mode not in {"full", "lazy"}:
+        raise ValueError(f"unknown pair testing mode: {pair_testing_mode}")
+    if pair_priority_policy not in {"default", "history", "effect-size", "mixed"}:
+        raise ValueError(f"unknown pair priority policy: {pair_priority_policy}")
+    if batch_construction_mode != "pairwise":
+        raise ValueError("batch construction only supports pairwise")
 
     context = _prepare_run(
         input_path=Path(input_path),
@@ -243,11 +288,27 @@ def optimize_batches(
         max_rounds=max_rounds,
         beam_width=beam_width,
         max_batches_per_state=max_batches_per_state,
+        budgeted_validation_strategy=budgeted_validation_strategy,
+        max_component_size=max_component_size,
+        max_batch_candidates=max_batch_candidates,
+        batchify_terminal_states=batchify_terminal_states,
         validate_batches=validate_batches,
         allow_sampled_batches=allow_sampled_batches,
+        allow_bounded_validation=allow_bounded_validation,
+        batch_validation_mode=batch_validation_mode,
+        max_permutation_factorial=max_permutation_factorial,
+        max_validation_sequences=max_validation_sequences,
+        max_validation_dag_nodes=max_validation_dag_nodes,
+        max_validation_dag_edges=max_validation_dag_edges,
+        dump_validation_dag=dump_validation_dag,
+        validation_dag_selected_only=validation_dag_selected_only,
         jobs=jobs,
         timeout=timeout,
         max_pairs=max_pairs,
+        pair_testing_mode=pair_testing_mode,
+        pair_test_budget_per_state=pair_test_budget_per_state,
+        pair_priority_policy=pair_priority_policy,
+        batch_construction_mode=batch_construction_mode,
         max_states=max_states,
         batch_frontier_policy=batch_frontier_policy or "",
         batch_selection_policy=batch_selection_policy,
@@ -255,6 +316,9 @@ def optimize_batches(
         selection_seed=selection_seed,
         exact_fail_on_incomplete=exact_fail_on_incomplete,
         verify_final_pipeline=verify_final_pipeline,
+        llvm_diff=llvm_diff,
+        keep_ir_artifacts=keep_ir_artifacts,
+        root_ir_mode=root_ir_mode,
     )
     context["timing"] = {
         "optimizer_start": optimizer_start,
@@ -268,6 +332,12 @@ def optimize_batches(
         if selected_mode == "exact" and allow_sampled_batches:
             selected_mode = "budgeted"
             auto_reason = "sampled batches are allowed, so exact proof mode is not applicable"
+        if selected_mode == "exact" and allow_bounded_validation:
+            selected_mode = "budgeted"
+            auto_reason = "bounded validation execution is allowed, so exact proof mode is not applicable"
+        if selected_mode == "exact" and budgeted_validation_strategy != "all":
+            selected_mode = "budgeted"
+            auto_reason = "on-demand validation is budgeted-only"
         context["mode"] = selected_mode
         context["auto_reason"] = auto_reason
     if context["mode"] == "budgeted":
@@ -309,6 +379,13 @@ def optimize_batches(
         result["replay_hashes_match"] = "not_run"
         update_replay_status_artifacts(Path(result["out_dir"]), None, "not_run")
 
+    result.update(write_equality_tier_summary(Path(result["out_dir"])))
+    from .pair_cost import write_pair_cost_summary
+
+    result.update(write_pair_cost_summary(Path(result["out_dir"])))
+    result.update(write_batch_validation_ladder_summary(Path(result["out_dir"])))
+    result.update(write_pair_scheduling_summary(Path(result["out_dir"])))
+
     from .final_summary import generate_final_summary
 
     final_summary = generate_final_summary(Path(result["out_dir"]))
@@ -316,6 +393,10 @@ def optimize_batches(
     result["final_summary_index"] = str(Path(result["out_dir"]) / "final_summary_index.csv")
     timing_path = _write_optimizer_timing(Path(result["out_dir"]), context, elapsed_ms=(time.perf_counter() - optimizer_start) * 1000)
     result["optimizer_timing_csv"] = str(timing_path)
+    if keep_ir_artifacts:
+        result.update(mark_ir_artifacts_kept())
+    else:
+        result.update(cleanup_ir_artifacts(Path(result["out_dir"])))
     return result
 
 
@@ -332,6 +413,37 @@ def _resolve_budgeted_policies(
     return batch_selection_policy or "score", frontier_selection_policy or "score"
 
 
+def _pair_testing_kwargs(context: dict) -> dict:
+    kwargs = {}
+    if context.get("pair_testing_mode", "full") != "full":
+        kwargs["pair_testing_mode"] = context.get("pair_testing_mode", "full")
+    if _int(context.get("pair_test_budget_per_state")) != 0:
+        kwargs["pair_test_budget_per_state"] = _int(context.get("pair_test_budget_per_state"))
+    if context.get("pair_priority_policy", "mixed") != "mixed":
+        kwargs["pair_priority_policy"] = context.get("pair_priority_policy", "mixed")
+    if context.get("keep_ir_artifacts"):
+        kwargs["keep_ir_artifacts"] = True
+    return kwargs
+
+
+def _state_pair_matrix_complete(state_dir: Path, *, pair_testing_mode: str = "full") -> bool:
+    if pair_testing_mode != "full":
+        return False
+    active = [
+        row
+        for row in _read_csv(Path(state_dir) / "pass_profile.csv")
+        if _is_true(row.get("success")) and _is_true(row.get("active")) and row.get("pass")
+    ]
+    expected = len(active) * (len(active) - 1) // 2
+    rows = _read_csv(Path(state_dir) / "pair_relation.csv")
+    return len(rows) == expected and not any(
+        row.get("dynamic_relation") == "not_tested"
+        or row.get("failure_kind") in {"lazy_budget", "max_pairs"}
+        or _is_true(row.get("skipped_by_budget"))
+        for row in rows
+    )
+
+
 def _prepare_run(**kwargs) -> dict:
     input_path: Path = kwargs["input_path"]
     out_dir: Path = kwargs["out_dir"]
@@ -344,6 +456,12 @@ def _prepare_run(**kwargs) -> dict:
     pass_registry = load_pass_registry(passes_path)
     configured_passes = pass_registry.names()
     metadata = collect_toolchain()
+    llvm_diff = kwargs.get("llvm_diff")
+    if llvm_diff:
+        metadata.setdefault("tools", {})["llvm-diff"] = {
+            "path": str(llvm_diff),
+            "version": None,
+        }
     metadata.update(
         {
             "input": str(input_path),
@@ -354,6 +472,10 @@ def _prepare_run(**kwargs) -> dict:
             "max_rounds": kwargs["max_rounds"],
             "beam_width": kwargs["beam_width"],
             "max_batches_per_state": kwargs["max_batches_per_state"],
+            "budgeted_validation_strategy": kwargs["budgeted_validation_strategy"],
+            "max_component_size": kwargs["max_component_size"],
+            "max_batch_candidates": kwargs["max_batch_candidates"],
+            "batchify_terminal_states": kwargs["batchify_terminal_states"],
             "max_states": kwargs["max_states"],
             "batch_frontier_policy": kwargs["batch_frontier_policy"],
             "batch_selection_policy": kwargs["batch_selection_policy"],
@@ -361,19 +483,46 @@ def _prepare_run(**kwargs) -> dict:
             "selection_seed": kwargs["selection_seed"],
             "validate_batches": kwargs["validate_batches"],
             "allow_sampled_batches": kwargs["allow_sampled_batches"],
+            "allow_bounded_validation": kwargs["allow_bounded_validation"],
+            "batch_validation_mode": kwargs["batch_validation_mode"],
+            "max_permutation_factorial": kwargs["max_permutation_factorial"],
+            "max_validation_sequences": kwargs["max_validation_sequences"],
+            "max_validation_dag_nodes": kwargs["max_validation_dag_nodes"],
+            "max_validation_dag_edges": kwargs["max_validation_dag_edges"],
+            "dump_validation_dag": kwargs["dump_validation_dag"],
+            "validation_dag_selected_only": kwargs["validation_dag_selected_only"],
             "exact_fail_on_incomplete": kwargs["exact_fail_on_incomplete"],
             "verify_final_pipeline": kwargs["verify_final_pipeline"],
+            "keep_ir_artifacts": kwargs["keep_ir_artifacts"],
+            "root_ir_mode": kwargs["root_ir_mode"],
             "jobs": kwargs["jobs"],
             "timeout": kwargs["timeout"],
             "max_pairs": kwargs["max_pairs"],
+            "pair_testing_mode": kwargs["pair_testing_mode"],
+            "pair_test_budget_per_state": kwargs["pair_test_budget_per_state"],
+            "pair_priority_policy": kwargs["pair_priority_policy"],
+            "batch_construction_mode": kwargs["batch_construction_mode"],
+            "pair_matrix_complete": (
+                kwargs["pair_testing_mode"] == "full" and kwargs["max_pairs"] is None
+            ),
             "optimizer_version": "exact-1",
         }
     )
     write_metadata(out_dir, metadata)
     tools = _tool_paths(metadata)
     tools["_pass_registry"] = pass_registry
+    tools["_keep_ir_artifacts"] = bool(kwargs["keep_ir_artifacts"])
 
-    prepared_ir = prepare_input_ir(input_path, out_dir, tools, kwargs["timeout"])
+    if kwargs["root_ir_mode"] == "legacy-o0":
+        prepared_ir = prepare_input_ir(input_path, out_dir, tools, kwargs["timeout"])
+    else:
+        prepared_ir = prepare_input_ir(
+            input_path,
+            out_dir,
+            tools,
+            kwargs["timeout"],
+            root_ir_mode=kwargs["root_ir_mode"],
+        )
     valid_passes, invalid_rows = validate_passes(
         prepared_ir,
         configured_passes,
@@ -403,6 +552,7 @@ def _prepare_run(**kwargs) -> dict:
         depth=0,
         parent_state_id="",
         transition_pass="",
+        **_pair_testing_kwargs(kwargs),
     )
     root_row = _state_row_from_summary(
         root_dir,
@@ -453,6 +603,8 @@ def _choose_auto_mode(context: dict) -> tuple[str, str]:
 
     if context["allow_sampled_batches"]:
         return "budgeted", "sampled batches are allowed, so exact proof mode is not applicable"
+    if context["allow_bounded_validation"]:
+        return "budgeted", "bounded validation execution is allowed, so exact proof mode is not applicable"
     if truncated:
         return "budgeted", "root batch candidates were truncated"
     if unresolved:
@@ -516,7 +668,12 @@ def _run_budgeted(context: dict) -> dict:
             parent_input = state_input_by_id[parent_id]
             expanded_states.add(parent_id)
             _event(event_rows, round_index, parent_id, "build_batches", "building and classifying batch candidates")
-            _build_validate_classify(parent_dir, context, allow_sampled_batches=context["allow_sampled_batches"])
+            _build_validate_classify(
+                parent_dir,
+                context,
+                allow_sampled_batches=context["allow_sampled_batches"],
+                allow_bounded_validation=context["allow_bounded_validation"],
+            )
             if context["validate_batches"]:
                 _event(event_rows, round_index, parent_id, "validate_batches", "batch validation completed")
 
@@ -603,7 +760,12 @@ def _run_budgeted(context: dict) -> dict:
                 else:
                     _event(event_rows, round_index, child_id, "analyze_state", "analyzing new child state")
                     _analyze_new_state(context, child_input, child_dir, child_id, round_index + 1, parent_id, canonical_order)
-                    _build_validate_classify(child_dir, context, allow_sampled_batches=context["allow_sampled_batches"])
+                    _build_validate_classify(
+                        child_dir,
+                        context,
+                        allow_sampled_batches=context["allow_sampled_batches"],
+                        allow_bounded_validation=context["allow_bounded_validation"],
+                    )
                     _write_unselected_batch_scores(child_dir, context)
                     child_row = _state_row_from_summary(
                         child_dir,
@@ -875,6 +1037,29 @@ def _finish_run(
     out_dir: Path = context["out_dir"]
     frontier_score_rows = frontier_score_rows or []
     event_rows = event_rows or []
+    if context.get("batchify_terminal_states", True):
+        _batchify_terminal_frontier_states(state_rows, leaf_reasons, context)
+    context["pair_matrix_complete"] = all(
+        _state_pair_matrix_complete(
+            Path(row.get("state_dir", "")),
+            pair_testing_mode=context.get("pair_testing_mode", "full"),
+        )
+        for row in state_rows
+        if not _is_true(row.get("is_duplicate")) and row.get("state_dir")
+    )
+    pair_matrix_complete = bool(context["pair_matrix_complete"])
+    metadata_path = out_dir / "metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {}
+    metadata.update(
+        {
+            "batch_construction_mode": context.get("batch_construction_mode", "pairwise"),
+            "budgeted_validation_strategy": context.get("budgeted_validation_strategy", "all"),
+            "pair_matrix_complete": pair_matrix_complete,
+            "exact_status": exact_status,
+            "exact_incomplete_reasons": exact_reasons,
+        }
+    )
+    write_metadata(out_dir, metadata)
     state_rows_by_id = {row.get("state_id", ""): row for row in state_rows}
     selected_state_id = _select_best_state(state_rows, objective_by_state, path_info_by_state)
     selected_input = state_input_by_id[selected_state_id]
@@ -905,6 +1090,12 @@ def _finish_run(
             objective_by_state[selected_state_id],
         )
     ]
+    selected_terminal_report = _selected_terminal_report(
+        selected_state_id,
+        leaf_rows,
+        state_rows_by_id=state_rows_by_id,
+        exact_status=exact_status,
+    )
     optimized_pipeline_names = _flatten_pipeline_names(chosen_path_rows)
     optimized_pipeline = _flatten_pipeline(chosen_path_rows, context.get("pass_registry"))
     _write_csv(out_dir / "states.csv", STATE_FIELDS, state_rows)
@@ -943,6 +1134,23 @@ def _finish_run(
         beam_width=context["beam_width"],
         max_states=context["max_states"],
         max_batches_per_state=context["max_batches_per_state"],
+        budgeted_validation_strategy=context["budgeted_validation_strategy"],
+        max_component_size=context["max_component_size"],
+        max_batch_candidates=context["max_batch_candidates"],
+        batchify_terminal_states=context["batchify_terminal_states"],
+        batch_validation_mode=context["batch_validation_mode"],
+        max_permutation_factorial=context["max_permutation_factorial"],
+        max_validation_sequences=context["max_validation_sequences"],
+        max_validation_dag_nodes=context["max_validation_dag_nodes"],
+        max_validation_dag_edges=context["max_validation_dag_edges"],
+        dump_validation_dag=context["dump_validation_dag"],
+        validation_dag_selected_only=context["validation_dag_selected_only"],
+        allow_bounded_validation=context["allow_bounded_validation"],
+        pair_testing_mode=context["pair_testing_mode"],
+        pair_test_budget_per_state=context["pair_test_budget_per_state"],
+        pair_priority_policy=context["pair_priority_policy"],
+        batch_construction_mode=context["batch_construction_mode"],
+        pair_matrix_complete=pair_matrix_complete,
         batch_frontier_policy=context["batch_frontier_policy"],
         batch_selection_policy=context["batch_selection_policy"],
         frontier_selection_policy=context["frontier_selection_policy"],
@@ -960,6 +1168,7 @@ def _finish_run(
         exact_reasons=exact_reasons,
         budget_exhausted=budget_exhausted,
         stop_reason=stop_reason,
+        selected_terminal_report=selected_terminal_report,
     )
 
     duplicate_states = sum(1 for row in state_rows if row.get("is_duplicate") == "true")
@@ -971,6 +1180,9 @@ def _finish_run(
         "auto_reason": context.get("auto_reason", ""),
         "batch_selection_policy": context["batch_selection_policy"],
         "frontier_selection_policy": context["frontier_selection_policy"],
+        "budgeted_validation_strategy": context["budgeted_validation_strategy"],
+        "batch_construction_mode": context["batch_construction_mode"],
+        "pair_matrix_complete": _bool(pair_matrix_complete),
         "states": len(state_rows),
         "unique_states": len(state_rows) - duplicate_states,
         "duplicate_states": duplicate_states,
@@ -980,6 +1192,11 @@ def _finish_run(
         "final_objective_value": objective_by_state[selected_state_id],
         "exact_status": exact_status,
         "exact_incomplete_reasons": ";".join(exact_reasons),
+        "selected_final_state_truncated": selected_terminal_report["selected_final_state_truncated"],
+        "remaining_active_pass_count": selected_terminal_report["remaining_active_pass_count"],
+        "remaining_active_passes": selected_terminal_report["remaining_active_passes"],
+        "remaining_executable_batch_count": selected_terminal_report["remaining_executable_batch_count"],
+        "remaining_executable_batches": selected_terminal_report["remaining_executable_batches"],
         "budget_exhausted": budget_exhausted,
         "stop_reason": stop_reason,
         "final_ll": str(out_dir / "final.ll"),
@@ -993,6 +1210,18 @@ def _record_batch_apply(context: dict, result) -> None:
     timing = context.setdefault("timing", {})
     timing["batch_apply_time_ms"] = _float(timing.get("batch_apply_time_ms")) + _float(getattr(result, "time_ms", 0.0))
     timing["batch_apply_opt_invocations"] = _int(timing.get("batch_apply_opt_invocations")) + 1
+
+
+def _run_timed_batch_validation(context: dict, operation):
+    started = time.perf_counter()
+    try:
+        return operation()
+    finally:
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        timing = context.setdefault("timing", {})
+        timing["batch_validation_wall_time_ms"] = (
+            _float(timing.get("batch_validation_wall_time_ms")) + elapsed_ms
+        )
 
 
 def _write_optimizer_timing(out_dir: Path, context: dict, *, elapsed_ms: float) -> Path:
@@ -1010,10 +1239,19 @@ def _write_optimizer_timing(out_dir: Path, context: dict, *, elapsed_ms: float) 
         for row in _read_csv(state_dir / "pair_relation.csv"):
             if row.get("dynamic_relation") == "not_tested" or row.get("failure_kind") == "max_pairs":
                 continue
-            pair_opt_invocations += 2
+            if row.get("pair_test_opt_runs") not in {"", None}:
+                pair_opt_invocations += _int(row.get("pair_test_opt_runs"))
+            else:
+                pair_opt_invocations += 2
         for row in _read_csv(state_dir / "batch_validation.csv"):
             batch_validation_time += _float(row.get("time_ms"))
-            validation_opt_invocations += _int(row.get("tested_orders"))
+            validation_opt_invocations += _int(
+                row.get("validation_opt_invocations") or row.get("tested_orders")
+            )
+
+    measured_validation_wall = timing.get("batch_validation_wall_time_ms")
+    if measured_validation_wall not in {None, ""}:
+        batch_validation_time = _float(measured_validation_wall)
 
     batch_apply_time = _float(timing.get("batch_apply_time_ms"))
     batch_apply_invocations = _int(timing.get("batch_apply_opt_invocations"))
@@ -1070,26 +1308,263 @@ def _optimizer_state_dirs(out_dir: Path) -> list[Path]:
     return unique_dirs
 
 
-def _build_validate_classify(state_dir: Path, context: dict, *, allow_sampled_batches: bool) -> dict:
-    result = build_batch_family(state_dir)
+def _build_validate_classify(
+    state_dir: Path,
+    context: dict,
+    *,
+    allow_sampled_batches: bool,
+    allow_bounded_validation: bool = False,
+) -> dict:
+    state_key = Path(state_dir).resolve()
+    built_states = context.setdefault("_batchified_state_dirs", set())
+    if state_key in built_states and _has_batchified_state_reports(Path(state_dir)):
+        summary = _first_row(Path(state_dir) / "batch_summary.csv")
+        return {
+            "batch_candidates": len(_read_csv(Path(state_dir) / "batch_candidates.csv")),
+            "truncated": _is_true(summary.get("truncated")),
+            "batch_construction_mode": "pairwise",
+            "correctness_rows": _read_csv(Path(state_dir) / "batch_correctness.csv"),
+        }
+    result = build_batch_family(
+        state_dir,
+        max_component_size=context["max_component_size"],
+        max_batch_candidates=context["max_batch_candidates"],
+    )
     if context["validate_batches"]:
-        result.update(
-            validate_batch_candidates(
+        if context.get("budgeted_validation_strategy") == "on-demand":
+            validation_result = _validate_batch_candidates_on_demand(
+                state_dir,
+                context,
+                allow_sampled_batches=allow_sampled_batches,
+                allow_bounded_validation=allow_bounded_validation,
+            )
+        else:
+            validation_result = _run_timed_batch_validation(
+                context,
+                lambda: _validate_batch_candidates_with_ladder(
+                    state_dir,
+                    context["tools"],
+                    timeout=context["timeout"],
+                    jobs=context["jobs"],
+                    max_permutation_factorial=context["max_permutation_factorial"],
+                    max_validation_sequences=context["max_validation_sequences"],
+                    max_validation_dag_nodes=context["max_validation_dag_nodes"],
+                    max_validation_dag_edges=context["max_validation_dag_edges"],
+                    dump_validation_dag=context["dump_validation_dag"],
+                    validation_dag_selected_only=context["validation_dag_selected_only"],
+                    batch_validation_mode=context["batch_validation_mode"],
+                ),
+            )
+        result.update(validation_result)
+    result["batch_construction_mode"] = "pairwise"
+    correctness_rows = classify_batch_correctness(
+        state_dir,
+        allow_sampled_batches=allow_sampled_batches,
+        allow_bounded_validation=allow_bounded_validation,
+    )
+    build_coverage_report(state_dir)
+    result["correctness_rows"] = correctness_rows
+    built_states.add(state_key)
+    return result
+
+
+def _validate_batch_candidates_on_demand(
+    state_dir: Path,
+    context: dict,
+    *,
+    allow_sampled_batches: bool,
+    allow_bounded_validation: bool,
+) -> dict:
+    candidates = _read_csv(Path(state_dir) / "batch_candidates.csv")
+    ranked_candidates = _rank_candidates_for_validation(Path(state_dir), candidates)
+    attempted_ids: list[str] = []
+    target = max(0, _int(context.get("max_batches_per_state")))
+    result: dict = {}
+    runtime = ValidationRuntime(Path(state_dir), max_workers=context["jobs"])
+
+    if target == 0 or not ranked_candidates:
+        result = _run_timed_batch_validation(
+            context,
+            lambda: _validate_batch_candidates_with_ladder(
                 state_dir,
                 context["tools"],
                 timeout=context["timeout"],
                 jobs=context["jobs"],
-            )
+                max_permutation_factorial=context["max_permutation_factorial"],
+                max_validation_sequences=context["max_validation_sequences"],
+                max_validation_dag_nodes=context["max_validation_dag_nodes"],
+                max_validation_dag_edges=context["max_validation_dag_edges"],
+                dump_validation_dag=context["dump_validation_dag"],
+                validation_dag_selected_only=context["validation_dag_selected_only"],
+                batch_validation_mode=context["batch_validation_mode"],
+                candidate_ids=[],
+                runtime=runtime,
+            ),
         )
-    correctness_rows = classify_batch_correctness(state_dir, allow_sampled_batches=allow_sampled_batches)
-    build_coverage_report(state_dir)
-    result["correctness_rows"] = correctness_rows
+        runtime.close(timeout=context["timeout"])
+        return result
+
+    for candidate in ranked_candidates:
+        batch_id = candidate.get("batch_id", "")
+        if not batch_id:
+            continue
+        attempted_ids.append(batch_id)
+        result = _run_timed_batch_validation(
+            context,
+            lambda: _validate_batch_candidates_with_ladder(
+                state_dir,
+                context["tools"],
+                timeout=context["timeout"],
+                jobs=context["jobs"],
+                max_permutation_factorial=context["max_permutation_factorial"],
+                max_validation_sequences=context["max_validation_sequences"],
+                max_validation_dag_nodes=context["max_validation_dag_nodes"],
+                max_validation_dag_edges=context["max_validation_dag_edges"],
+                dump_validation_dag=context["dump_validation_dag"],
+                validation_dag_selected_only=context["validation_dag_selected_only"],
+                batch_validation_mode=context["batch_validation_mode"],
+                candidate_ids=list(attempted_ids),
+                runtime=runtime,
+            ),
+        )
+        correctness_rows = classify_batch_correctness(
+            state_dir,
+            allow_sampled_batches=allow_sampled_batches,
+            allow_bounded_validation=allow_bounded_validation,
+        )
+        if sum(1 for row in correctness_rows if row.get("can_execute") == "true") >= target:
+            break
+    runtime.close(timeout=context["timeout"])
     return result
+
+
+def _rank_candidates_for_validation(state_dir: Path, candidates: list[dict]) -> list[dict]:
+    state_summary = _first_row(Path(state_dir) / "per_state_summary.csv")
+    active_passes = max(1, _int(state_summary.get("active_passes")))
+
+    def ranking_key(candidate: dict) -> tuple[float, int, int, str, str]:
+        batch_size = _int(candidate.get("batch_size"))
+        explicit_coverage = candidate.get("active_pass_coverage")
+        coverage = _float(explicit_coverage) if explicit_coverage not in {None, ""} else batch_size / active_passes
+        return (
+            -coverage,
+            -batch_size,
+            _int(candidate.get("unresolved_components")),
+            candidate.get("canonical_order") or candidate.get("batch_passes", ""),
+            candidate.get("batch_id", ""),
+        )
+
+    return sorted(candidates, key=ranking_key)
+
+
+def _validate_batch_candidates_with_ladder(
+    state_dir: Path,
+    tools: dict,
+    *,
+    timeout: int,
+    jobs: int,
+    max_permutation_factorial: int,
+    max_validation_sequences: int,
+    max_validation_dag_nodes: int,
+    max_validation_dag_edges: int,
+    dump_validation_dag: bool,
+    validation_dag_selected_only: bool,
+    batch_validation_mode: str,
+    candidate_ids: list[str] | None = None,
+    runtime: ValidationRuntime | None = None,
+) -> dict:
+    kwargs = {"timeout": timeout, "jobs": jobs}
+    if max_permutation_factorial != 120:
+        kwargs["max_permutation_factorial"] = max_permutation_factorial
+    if max_validation_sequences != 200:
+        kwargs["max_validation_sequences"] = max_validation_sequences
+    if max_validation_dag_nodes != 5000:
+        kwargs["max_validation_dag_nodes"] = max_validation_dag_nodes
+    if max_validation_dag_edges != 20000:
+        kwargs["max_validation_dag_edges"] = max_validation_dag_edges
+    if dump_validation_dag:
+        kwargs["dump_validation_dag"] = dump_validation_dag
+    if validation_dag_selected_only:
+        kwargs["validation_dag_selected_only"] = validation_dag_selected_only
+    if batch_validation_mode != "auto":
+        kwargs["batch_validation_mode"] = batch_validation_mode
+    if candidate_ids is not None:
+        kwargs["candidate_ids"] = candidate_ids
+    if runtime is not None:
+        kwargs["runtime"] = runtime
+    return validate_batch_candidates(state_dir, tools, **kwargs)
+
+
+def _batchify_terminal_frontier_states(state_rows: list[dict], leaf_reasons: dict[str, str], context: dict) -> None:
+    for state in state_rows:
+        state_id = state.get("state_id", "")
+        if leaf_reasons.get(state_id) != "max_rounds_reached":
+            continue
+        if _is_true(state.get("is_duplicate")):
+            continue
+        state_dir = Path(state.get("state_dir", ""))
+        if not state_dir:
+            continue
+        if _has_batchified_state_reports(state_dir):
+            continue
+        _build_validate_classify(
+            state_dir,
+            context,
+            allow_sampled_batches=context["allow_sampled_batches"] if context["mode"] == "budgeted" else False,
+            allow_bounded_validation=context["allow_bounded_validation"] if context["mode"] == "budgeted" else False,
+        )
+
+
+def _has_batchified_state_reports(state_dir: Path) -> bool:
+    return (
+        (state_dir / "batch_summary.csv").exists()
+        and (state_dir / "batch_correctness.csv").exists()
+        and (state_dir / "coverage_summary.csv").exists()
+    )
+
+
+def _selected_terminal_report(selected_state_id: str, leaf_rows: list[dict], *, state_rows_by_id: dict[str, dict], exact_status: str) -> dict:
+    leaf = next((row for row in leaf_rows if row.get("state_id") == selected_state_id), {})
+    leaf_reason = leaf.get("leaf_reason", "")
+    state_dir = Path(state_rows_by_id.get(selected_state_id, {}).get("state_dir", ""))
+    active_passes = _remaining_active_passes(state_dir)
+    executable_batches = _remaining_executable_batches(state_dir)
+    truncated = leaf_reason in {"max_rounds_reached", "state_cap_reached", "exact_incomplete", "beam_pruned"}
+    if exact_status and exact_status not in {"exact_complete", "not_applicable"}:
+        truncated = True
+    return {
+        "selected_final_state_truncated": _bool(truncated),
+        "remaining_active_pass_count": str(len(active_passes)),
+        "remaining_active_passes": ";".join(active_passes),
+        "remaining_executable_batch_count": str(len(executable_batches)),
+        "remaining_executable_batches": ";".join(executable_batches),
+    }
+
+
+def _remaining_active_passes(state_dir: Path) -> list[str]:
+    return [
+        row.get("pass", "")
+        for row in _read_csv(state_dir / "pass_profile.csv")
+        if row.get("pass") and _is_true(row.get("success")) and _is_true(row.get("active"))
+    ]
+
+
+def _remaining_executable_batches(state_dir: Path) -> list[str]:
+    return [
+        row.get("batch_id", "")
+        for row in _read_csv(state_dir / "batch_correctness.csv")
+        if row.get("batch_id") and row.get("can_execute") == "true"
+    ]
 
 
 def _exact_incomplete_reasons(state_dir: Path, batch_info: dict) -> list[str]:
     state_id = state_dir.name
     reasons: list[str] = []
+    pair_rows = _read_csv(state_dir / "pair_relation.csv")
+    if any(row.get("failure_kind") == "lazy_budget" or _is_true(row.get("skipped_by_budget")) for row in pair_rows):
+        reasons.append(f"pair_relation_incomplete_lazy_budget:{state_id}")
+    if any(row.get("failure_kind") == "max_pairs" or (row.get("dynamic_relation") == "not_tested" and row.get("failure_kind") != "lazy_budget") for row in pair_rows):
+        reasons.append(f"pair_relation_incomplete_max_pairs:{state_id}")
     summary = _first_row(state_dir / "batch_summary.csv")
     if _is_true(summary.get("truncated")) or bool(batch_info.get("truncated")):
         reasons.append(f"truncated_batch_candidates:{state_id}")
@@ -1108,6 +1583,21 @@ def _exact_incomplete_reasons(state_dir: Path, batch_info: dict) -> list[str]:
         reasons.append(f"missing_correctness_rows:{state_id}")
     if any(correctness_by_id.get(row.get("batch_id", ""), {}).get("validation_status") in {"", "not_validated"} for row in candidates):
         reasons.append(f"missing_validation:{state_id}")
+    validations = _read_csv(state_dir / "batch_validation.csv")
+    if any(
+        row.get("validation_tier") == "permutation_dag_incomplete"
+        or _is_true(row.get("validation_dag_budget_exceeded"))
+        for row in validations
+    ):
+        reasons.append(f"validation_dag_incomplete:{state_id}")
+    non_certified = [
+        row.get("batch_id", "")
+        for row in candidates
+        if row.get("batch_id", "")
+        and not _is_exact_executable(correctness_by_id.get(row.get("batch_id", ""), {}))
+    ]
+    if non_certified:
+        reasons.append(f"non_certified_batch_validation:{state_id}")
     return reasons
 
 
@@ -1144,7 +1634,7 @@ def score_batch_candidate(state_dir: Path, batch_row: dict, context: dict) -> di
     validation_status = correctness.get("validation_status") or "not_validated"
     if correctness_class == "certified_batch" or validation_status == "all_permutations_same":
         evidence_score = 1.0
-    elif correctness_class == "sampled_batch" or validation_status == "sampled_same":
+    elif correctness_class in {"sampled_batch", "bounded_batch"} or validation_status in {"sampled_same", "bounded_same"}:
         evidence_score = 0.5
     else:
         evidence_score = 0.0
@@ -1153,9 +1643,9 @@ def score_batch_candidate(state_dir: Path, batch_row: dict, context: dict) -> di
     total_components = _int(batch_row.get("num_conflict_components")) or _int(summary.get("conflict_components")) or 1
     unresolved_components = _int(batch_row.get("unresolved_components")) or _int(summary.get("unresolved_components"))
     risk_penalty = unresolved_components / max(1, total_components)
-    if correctness_class == "sampled_batch" or validation_status == "sampled_same":
+    if correctness_class in {"sampled_batch", "bounded_batch"} or validation_status in {"sampled_same", "bounded_same"}:
         risk_penalty += 0.25
-    if correctness_class not in {"certified_batch", "sampled_batch"} and validation_status not in {"all_permutations_same", "sampled_same"}:
+    if correctness_class not in {"certified_batch", "sampled_batch", "bounded_batch"} and validation_status not in {"all_permutations_same", "sampled_same", "bounded_same"}:
         risk_penalty = 1.0
     risk_penalty = _clamp(risk_penalty)
 
@@ -1251,6 +1741,7 @@ def _analyze_new_state(context: dict, input_ll: Path, state_dir: Path, state_id:
         depth=depth,
         parent_state_id=parent_state_id,
         transition_pass=transition_pass,
+        **_pair_testing_kwargs(context),
     )
 
 
@@ -1290,6 +1781,7 @@ def _state_row_from_summary(
         "state_dir": str(state_dir),
         "is_duplicate": _bool(is_duplicate),
         "duplicate_of": duplicate_of,
+        **_state_feature_fields(ir_path),
         "active_passes": summary.get("active_passes", ""),
         "pairs_tested": summary.get("pairs_tested", ""),
         "dynamic_commute": summary.get("dynamic_commute", ""),
@@ -1552,6 +2044,13 @@ def score_frontier_state(child_state: dict, parent_state: dict, transition: dict
     raw_objective = (root_inst - child_inst) / max(1, root_inst)
     objective_score = _clamp(raw_objective)
     parent_gain = (parent_inst - child_inst) / max(1, parent_inst) if parent_inst else 0.0
+    root_state = context.get("root_row", {})
+    direct_calls = _int(child_state.get("direct_calls"))
+    memory_ops = _int(child_state.get("memory_ops"))
+    branches = _int(child_state.get("branches"))
+    direct_call_score = _feature_reduction_score(_int(root_state.get("direct_calls")), direct_calls)
+    memory_score = _feature_reduction_score(_int(root_state.get("memory_ops")), memory_ops)
+    branch_score = _feature_reduction_score(_int(root_state.get("branches")), branches)
 
     child_dir = Path(child_state.get("state_dir", ""))
     summary = _first_row(child_dir / "batch_summary.csv")
@@ -1609,6 +2108,12 @@ def score_frontier_state(child_state: dict, parent_state: dict, transition: dict
         "effect_changed_count_from_parent": str(effect_changed_count),
         "parent_gain": _format_score(parent_gain),
         "objective_score": _format_score(objective_score),
+        "direct_calls": str(direct_calls),
+        "memory_ops": str(memory_ops),
+        "branches": str(branches),
+        "direct_call_score": _format_score(direct_call_score),
+        "memory_score": _format_score(memory_score),
+        "branch_score": _format_score(branch_score),
         "future_potential_score": _format_score(future_potential_score),
         "evidence_quality_score": _format_score(evidence_quality_score),
         "novelty_score": _format_score(novelty_score),
@@ -1697,7 +2202,15 @@ def _pareto_kept_state_ids(rows: list[dict]) -> set[str]:
 
 
 def _dominates(candidate: dict, other: dict) -> bool:
-    high_fields = ["objective_score", "future_potential_score", "evidence_quality_score", "novelty_score"]
+    high_fields = [
+        "objective_score",
+        "direct_call_score",
+        "memory_score",
+        "branch_score",
+        "future_potential_score",
+        "evidence_quality_score",
+        "novelty_score",
+    ]
     low_fields = ["cost_score", "risk_penalty"]
     no_worse = all(_float(candidate.get(field)) >= _float(other.get(field)) for field in high_fields)
     no_worse = no_worse and all(_float(candidate.get(field)) <= _float(other.get(field)) for field in low_fields)
@@ -1713,12 +2226,6 @@ def _select_diversity_preserving_beam(rows: list[dict], *, beam_width: int) -> l
     non_pareto = [row for row in rows if row.get("pareto_kept") != "true"]
     pool = pareto or rows
     selected: list[tuple[dict, str]] = []
-    objective_slots = 1 if beam_width >= 1 else 0
-    novelty_slots = 1 if beam_width >= 2 else 0
-    if beam_width >= 10:
-        novelty_slots = max(novelty_slots, math.floor(0.2 * beam_width))
-    score_slots = max(0, beam_width - novelty_slots - objective_slots)
-
     def selected_ids() -> set[str]:
         return {row.get("state_id", "") for row, _bucket in selected}
 
@@ -1742,11 +2249,20 @@ def _select_diversity_preserving_beam(rows: list[dict], *, beam_width: int) -> l
     by_score = sorted(pool, key=lambda row: (-_float(row.get("final_state_score")), row.get("state_id", "")))
     by_novelty = sorted(pool, key=lambda row: (-_float(row.get("novelty_score")), -_float(row.get("final_state_score")), row.get("state_id", "")))
     by_objective = sorted(pool, key=lambda row: (_int(row.get("objective_value")), row.get("state_id", "")))
+    by_direct_calls = sorted(pool, key=lambda row: (_int(row.get("direct_calls")), -_float(row.get("final_state_score")), row.get("state_id", "")))
+    by_memory = sorted(pool, key=lambda row: (_int(row.get("memory_ops")), -_float(row.get("final_state_score")), row.get("state_id", "")))
+    by_branches = sorted(pool, key=lambda row: (_int(row.get("branches")), -_float(row.get("final_state_score")), row.get("state_id", "")))
     fallback = sorted(non_pareto, key=lambda row: (-_float(row.get("final_state_score")), row.get("state_id", "")))
 
-    add_rows(by_score, score_slots, "score_bucket")
-    add_rows(by_novelty, novelty_slots, "novelty_bucket", distinct_signature=True)
-    add_rows(by_objective, objective_slots, "objective_bucket")
+    add_rows(by_objective, 1, "objective_bucket")
+    if _field_varies(pool, "direct_calls"):
+        add_rows(by_direct_calls, 1, "direct_call_bucket")
+    if _field_varies(pool, "memory_ops"):
+        add_rows(by_memory, 1, "memory_bucket")
+    if _field_varies(pool, "branches"):
+        add_rows(by_branches, 1, "branch_bucket")
+    if len(selected) < beam_width:
+        add_rows(by_novelty, 1, "novelty_bucket", distinct_signature=True)
     add_rows(by_score, beam_width - len(selected), "score_fill")
     add_rows(fallback, beam_width - len(selected), "non_pareto_fill")
     return [(row.get("state_id", ""), bucket) for row, bucket in selected[:beam_width]]
@@ -1756,6 +2272,33 @@ def _row_signature(row: dict) -> str:
     active_signature = row.get("active_pass_signature", "")
     batch_signature = row.get("component_choices") or row.get("batch_passes") or row.get("last_batch_id") or row.get("state_id", "")
     return f"{active_signature}::{batch_signature}"
+
+
+def _field_varies(rows: list[dict], field: str) -> bool:
+    return len({_int(row.get(field)) for row in rows}) > 1
+
+
+def _feature_reduction_score(root_value: int, child_value: int) -> float:
+    if root_value <= 0:
+        return 0.0
+    return _clamp((root_value - child_value) / root_value)
+
+
+def _state_feature_fields(ir_path: Path) -> dict[str, str]:
+    features = count_ir_features(Path(ir_path))
+    loads = int(features.get("loads", 0))
+    stores = int(features.get("stores", 0))
+    return {
+        "ir_instructions": str(features.get("instructions", 0)),
+        "direct_calls": str(features.get("direct_calls", 0)),
+        "intrinsic_calls": str(features.get("intrinsic_calls", 0)),
+        "indirect_calls": str(features.get("indirect_calls", 0)),
+        "loads": str(loads),
+        "stores": str(stores),
+        "memory_ops": str(loads + stores),
+        "branches": str(features.get("branches", 0)),
+        "allocas": str(features.get("allocas", 0)),
+    }
 
 
 def _validation_time_ms(state_dir: Path) -> float:
@@ -2172,6 +2715,23 @@ def _write_summary(
     beam_width: int,
     max_states: int,
     max_batches_per_state: int,
+    budgeted_validation_strategy: str,
+    max_component_size: int,
+    max_batch_candidates: int,
+    batchify_terminal_states: bool,
+    batch_validation_mode: str,
+    max_permutation_factorial: int,
+    max_validation_sequences: int,
+    max_validation_dag_nodes: int,
+    max_validation_dag_edges: int,
+    dump_validation_dag: bool,
+    validation_dag_selected_only: bool,
+    allow_bounded_validation: bool,
+    pair_testing_mode: str,
+    pair_test_budget_per_state: int,
+    pair_priority_policy: str,
+    batch_construction_mode: str,
+    pair_matrix_complete: bool,
     batch_frontier_policy: str,
     batch_selection_policy: str,
     frontier_selection_policy: str,
@@ -2189,6 +2749,7 @@ def _write_summary(
     exact_reasons: list[str],
     budget_exhausted: bool,
     stop_reason: str,
+    selected_terminal_report: dict,
 ) -> None:
     duplicates = sum(1 for row in states if row.get("is_duplicate") == "true")
     selected_state = next((row for row in states if row.get("state_id") == selected_state_id), {})
@@ -2207,6 +2768,23 @@ def _write_summary(
         f"- beam_width: {beam_width}",
         f"- max_states: {max_states}",
         f"- max_batches_per_state: {max_batches_per_state}",
+        f"- budgeted_validation_strategy: {budgeted_validation_strategy}",
+        f"- max_component_size: {max_component_size}",
+        f"- max_batch_candidates: {max_batch_candidates}",
+        f"- batchify_terminal_states: {_bool(batchify_terminal_states)}",
+        f"- batch_validation_mode: {batch_validation_mode}",
+        f"- max_permutation_factorial: {max_permutation_factorial}",
+        f"- max_validation_sequences: {max_validation_sequences}",
+        f"- max_validation_dag_nodes: {max_validation_dag_nodes}",
+        f"- max_validation_dag_edges: {max_validation_dag_edges}",
+        f"- dump_validation_dag: {_bool(dump_validation_dag)}",
+        f"- validation_dag_selected_only: {_bool(validation_dag_selected_only)}",
+        f"- allow_bounded_validation: {_bool(allow_bounded_validation)}",
+        f"- pair_testing_mode: {pair_testing_mode}",
+        f"- pair_test_budget_per_state: {pair_test_budget_per_state}",
+        f"- pair_priority_policy: {pair_priority_policy}",
+        f"- batch_construction_mode: {batch_construction_mode}",
+        f"- pair_matrix_complete: {_bool(pair_matrix_complete)}",
         f"- batch_frontier_policy: {batch_frontier_policy}",
         f"- batch_selection_policy: {batch_selection_policy}",
         f"- frontier_selection_policy: {frontier_selection_policy}",
@@ -2220,6 +2798,11 @@ def _write_summary(
         f"- duplicate_transitions: {duplicate_transitions}",
         f"- budget_exhausted: {_bool(budget_exhausted)}",
         f"- stop_reason: {stop_reason}",
+        f"- selected_final_state_truncated: {selected_terminal_report.get('selected_final_state_truncated', 'false')}",
+        f"- remaining_active_pass_count: {selected_terminal_report.get('remaining_active_pass_count', '')}",
+        f"- remaining_active_passes: {selected_terminal_report.get('remaining_active_passes', '')}",
+        f"- remaining_executable_batch_count: {selected_terminal_report.get('remaining_executable_batch_count', '')}",
+        f"- remaining_executable_batches: {selected_terminal_report.get('remaining_executable_batches', '')}",
         f"- leaf_states: {sum(1 for row in leaf_rows if row.get('is_leaf') == 'true')}",
         f"- incumbent_state: {selected_state_id}",
         f"- incumbent_objective: {final_objective}",
@@ -2243,11 +2826,25 @@ def _write_summary(
         f"- beam_width: {beam_width}",
         f"- max_states: {max_states}",
         f"- max_batches_per_state: {max_batches_per_state}",
+        f"- max_component_size: {max_component_size}",
+        f"- max_batch_candidates: {max_batch_candidates}",
+        f"- batchify_terminal_states: {_bool(batchify_terminal_states)}",
+        f"- batch_validation_mode: {batch_validation_mode}",
+        f"- max_permutation_factorial: {max_permutation_factorial}",
+        f"- max_validation_sequences: {max_validation_sequences}",
+        f"- max_validation_dag_nodes: {max_validation_dag_nodes}",
+        f"- max_validation_dag_edges: {max_validation_dag_edges}",
+        f"- dump_validation_dag: {_bool(dump_validation_dag)}",
+        f"- validation_dag_selected_only: {_bool(validation_dag_selected_only)}",
+        f"- allow_bounded_validation: {_bool(allow_bounded_validation)}",
+        f"- pair_testing_mode: {pair_testing_mode}",
+        f"- pair_test_budget_per_state: {pair_test_budget_per_state}",
+        f"- pair_priority_policy: {pair_priority_policy}",
         "",
         "## Batch Selection Policy",
         "",
         "- Certified batches are executable by default when validation proves canonical-IR equality.",
-        "- Sampled batches execute only when explicitly allowed; sampled evidence is heuristic, not a hard certificate.",
+        "- Bounded and sampled batches execute only when explicitly allowed; their evidence is heuristic, not a hard certificate.",
         "- Rejected, failed, and unvalidated batches are not executed by the optimizer.",
         "- Budgeted score mode combines coverage, batch size, estimated reduction, evidence, diversity, and risk.",
         "- Batch selection and frontier selection are separate policies; batch_frontier_policy is a compatibility alias.",
@@ -2262,11 +2859,15 @@ def _write_summary(
         "- Pareto filtering keeps non-dominated states before beam selection.",
         "- Score frontier mode uses explicit score, novelty, and objective buckets, targeting a 70/20/10 style beam composition.",
         "",
+    ]
+    lines.extend(equality_tier_markdown(equality_tier_summary_for_run(path.parent)))
+    lines.extend([
+        "",
         "## Incumbent Path",
         "",
         "| step | parent | batch | child | validation | correctness | delta | duplicate |",
         "|---|---|---|---|---|---|---:|---|",
-    ]
+    ])
     if chosen_path_rows:
         for row in chosen_path_rows:
             lines.append(
@@ -2361,11 +2962,13 @@ def _exact_status(reasons: list[str], *, continued: bool) -> str:
 
 
 def _tool_paths(metadata: dict) -> dict[str, str]:
-    return {
+    tools = {
         name: details["path"]
         for name, details in metadata.get("tools", {}).items()
         if details.get("path")
     }
+    tools["_toolchain_metadata"] = metadata
+    return tools
 
 
 def _split_order(value: str | None) -> list[str]:

@@ -1,0 +1,50 @@
+root_ir_mode: inlinable-unoptimized
+
+runtime:
+  enabled: true
+  top_k: 5
+  warmups: 1
+  trials: 6
+  timeout: 30
+  expected_exit_code: 0
+  command:
+    - "{exe}"
+  llc_opt_level: O2
+
+stages:
+  - id: ipo
+    passes: ipo_inline_v4.yaml
+    mode: exact
+    max_rounds: 1
+    require_transition: true
+
+  - id: scalar
+    passes: scalar_passes_v2.yaml
+    mode: budgeted
+    max_rounds: 4
+    beam_width: 4
+    max_states: 500
+    max_batches_per_state: 20
+    max_component_size: 10
+    max_batch_candidates: 200
+
+  - id: loop
+    passes: loop_passes_v4.yaml
+    mode: exact
+    max_rounds: 2
+
+  - id: cleanup
+    passes: cleanup_passes_v4.yaml
+    mode: exact
+    max_rounds: 2
+
+  - id: vector_cleanup
+    passes: vector_cleanup_passes_v5.yaml
+    mode: budgeted
+    max_rounds: 2
+    beam_width: 8
+    max_states: 200
+    max_batches_per_state: 20
+    max_component_size: 9
+    max_batch_candidates: 100
+    runtime_rerank: true

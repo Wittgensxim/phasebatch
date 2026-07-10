@@ -1,0 +1,42 @@
+passes:
+  - name: loop-simplify
+    pipeline_candidates:
+      - function(loop-simplify)
+      - loop-simplify
+    category: loop
+    stage: loop
+  - name: lcssa
+    pipeline_candidates:
+      - function(lcssa)
+      - lcssa
+    category: loop
+    stage: loop
+  - name: loop-rotate
+    pipeline_candidates:
+      - function(loop(loop-rotate))
+      - loop-rotate
+      - loop(loop-rotate)
+    category: loop
+    stage: loop
+  - name: licm
+    pipeline_candidates:
+      - function(loop-mssa(licm))
+      - licm
+      - loop(licm)
+      - function(loop(licm))
+    category: loop
+    stage: loop
+  - name: indvars
+    pipeline_candidates:
+      - function(loop(indvars))
+      - indvars
+      - loop(indvars)
+    category: loop
+    stage: loop
+  - name: loop-deletion
+    pipeline_candidates:
+      - function(loop(loop-deletion))
+      - loop-deletion
+      - loop(loop-deletion)
+    category: loop
+    stage: loop

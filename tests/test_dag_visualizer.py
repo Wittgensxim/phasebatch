@@ -166,6 +166,24 @@ class DagVisualizerTests(unittest.TestCase):
         self.assertEqual(warning, "")
         self.assertTrue(output_exists)
 
+    def test_run_dot_skips_windows_batch_entrypoint_on_non_windows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake_dot = root / "dot.cmd"
+            fake_dot.write_text("@echo off\r\n", encoding="utf-8")
+            dot_file = root / "input.dot"
+            output_file = root / "output.svg"
+            dot_file.write_text("digraph G { A -> B }\n", encoding="utf-8")
+
+            with mock.patch("os.name", "posix"), \
+                mock.patch("phasebatch.dag_visualizer.shutil.which", return_value=str(fake_dot)), \
+                mock.patch("phasebatch.dag_visualizer.subprocess.run") as fake_run:
+                warning = _run_dot(dot_file, "svg", output_file)
+
+        self.assertIn("graphviz render skipped", warning)
+        self.assertIn(".cmd/.bat dot entrypoint cannot run on non-Windows", warning)
+        fake_run.assert_not_called()
+
 
 def _make_mock_run(run_dir: Path) -> None:
     for state_id in ["S0000", "S0001", "S0002", "S0003"]:

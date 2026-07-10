@@ -4,12 +4,26 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from phasebatch.pass_audit import audit_passes
+from phasebatch.pass_audit import audit_passes, run_opt_pipeline
 from phasebatch.pass_config import load_pass_config
 from phasebatch.schema import RunResult
 
 
 class PassAuditTests(unittest.TestCase):
+    def test_default_opt_runner_dispatches_through_shared_backend(self) -> None:
+        expected = RunResult(["worker"], 0, "", "", 1.0, backend="worker")
+        with patch("phasebatch.pass_audit.run_opt", return_value=expected) as run:
+            result = run_opt_pipeline("opt", Path("input.ll"), "function(instcombine)", Path("out.ll"), 7)
+
+        self.assertIs(result, expected)
+        run.assert_called_once_with(
+            "opt",
+            Path("input.ll"),
+            ["function(instcombine)"],
+            Path("out.ll"),
+            7,
+        )
+
     def test_audit_accepts_string_only_pass_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

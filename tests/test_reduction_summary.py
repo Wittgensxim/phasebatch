@@ -48,6 +48,10 @@ class ReductionSummaryTests(unittest.TestCase):
         self.assertEqual(summary[0]["selected_path_pass_invocations"], "5")
         self.assertEqual(summary[0]["final_pipeline_length"], "5")
         self.assertIn("# Reduction Evidence Summary", markdown)
+        self.assertIn("## Equality Tier Summary", markdown)
+        self.assertIn("| tier | count | hard_fold |", markdown)
+        self.assertIn("| structural_diff | 1 | 1 |", markdown)
+        self.assertIn("| failed | 1 | 0 |", markdown)
         self.assertIn("Objective is not used as commutation proof.", markdown)
 
 
@@ -149,11 +153,11 @@ def _make_mock_run(run_dir: Path) -> None:
     )
     _write_csv(
         s1 / "pair_relation.csv",
-        ["final_relation"],
+        ["final_relation", "equality_tier", "can_hard_fold"],
         [
-            {"final_relation": "final_commute"},
-            {"final_relation": "final_order_sensitive"},
-            {"final_relation": "final_unknown"},
+            {"final_relation": "final_commute", "equality_tier": "structural_diff", "can_hard_fold": "true"},
+            {"final_relation": "final_order_sensitive", "equality_tier": "different", "can_hard_fold": "false"},
+            {"final_relation": "final_unknown", "equality_tier": "failed", "can_hard_fold": "false"},
         ],
     )
     _write_csv(

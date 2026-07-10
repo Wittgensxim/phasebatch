@@ -5,9 +5,14 @@ from collections import Counter
 from pathlib import Path
 
 from .schema import BATCH_CORRECTNESS_FIELDS
+from .batch_validation_ladder import write_batch_validation_ladder_summary
 
 
-def classify_batch_correctness(state_dir: Path, allow_sampled_batches: bool = False) -> list[dict]:
+def classify_batch_correctness(
+    state_dir: Path,
+    allow_sampled_batches: bool = False,
+    allow_bounded_validation: bool = False,
+) -> list[dict]:
     state_dir = Path(state_dir)
     candidates = _read_csv(state_dir / "batch_candidates.csv")
     validation_by_id = {
@@ -19,7 +24,13 @@ def classify_batch_correctness(state_dir: Path, allow_sampled_batches: bool = Fa
     for candidate in candidates:
         validation = validation_by_id.get(candidate.get("batch_id", ""), {})
         status = validation.get("validation_status") or "not_validated"
-        classification = classify_validation_status(status, allow_sampled_batches=allow_sampled_batches)
+        classification = classify_validation_status(
+            status,
+            validation_tier=validation.get("validation_tier", ""),
+            validation_hard_certificate=validation.get("validation_hard_certificate", ""),
+            allow_sampled_batches=allow_sampled_batches,
+            allow_bounded_validation=allow_bounded_validation,
+        )
         rows.append(
             {
                 "program": candidate.get("program", validation.get("program", "")),
@@ -35,17 +46,33 @@ def classify_batch_correctness(state_dir: Path, allow_sampled_batches: bool = Fa
 
     _write_csv(state_dir / "batch_correctness.csv", BATCH_CORRECTNESS_FIELDS, rows)
     _append_correctness_summary(state_dir / "batch_summary.md", rows)
+    write_batch_validation_ladder_summary(state_dir)
     return rows
 
 
-def classify_validation_status(status: str, *, allow_sampled_batches: bool = False) -> dict:
+def classify_validation_status(
+    status: str,
+    *,
+    validation_tier: str = "",
+    validation_hard_certificate: str = "",
+    allow_sampled_batches: bool = False,
+    allow_bounded_validation: bool = False,
+) -> dict:
     normalized = status or "not_validated"
-    if normalized == "all_permutations_same":
+    hard_certificate = _is_true(validation_hard_certificate)
+    if normalized == "all_permutations_same" and (validation_tier in {"", "exhaustive_all_permutations"} or hard_certificate):
         return {
             "correctness_class": "certified_batch",
             "can_hard_fold": "true",
             "can_execute": "true",
             "reason": "all tested permutations produced identical canonical IR",
+        }
+    if normalized == "bounded_same":
+        return {
+            "correctness_class": "bounded_batch",
+            "can_hard_fold": "false",
+            "can_execute": _bool(allow_bounded_validation),
+            "reason": "bounded validation matched; not a hard certificate",
         }
     if normalized == "sampled_same":
         return {
@@ -68,6 +95,13 @@ def classify_validation_status(status: str, *, allow_sampled_batches: bool = Fal
             "can_execute": "false",
             "reason": "validation failed, crashed, timed out, or produced invalid IR",
         }
+    if normalized == "incomplete" or validation_tier == "permutation_dag_incomplete":
+        return {
+            "correctness_class": "unvalidated_batch",
+            "can_hard_fold": "false",
+            "can_execute": "false",
+            "reason": "validation did not complete; not a hard certificate",
+        }
     if normalized == "not_validated":
         return {
             "correctness_class": "unvalidated_batch",
@@ -87,6 +121,8 @@ def skip_reason_for_correctness(row: dict) -> str:
     if row.get("can_execute") == "true":
         return ""
     correctness_class = row.get("correctness_class", "")
+    if correctness_class == "bounded_batch":
+        return "bounded_not_allowed"
     if correctness_class == "sampled_batch":
         return "sampled_not_allowed"
     if correctness_class == "rejected_batch":
@@ -112,6 +148,7 @@ def _append_correctness_summary(path: Path, rows: list[dict]) -> None:
         "",
         f"- total batch candidates: {len(rows)}",
         f"- certified_batch count: {class_counts.get('certified_batch', 0)}",
+        f"- bounded_batch count: {class_counts.get('bounded_batch', 0)}",
         f"- sampled_batch count: {class_counts.get('sampled_batch', 0)}",
         f"- rejected_batch count: {class_counts.get('rejected_batch', 0)}",
         f"- failed_batch count: {class_counts.get('failed_batch', 0)}",
@@ -138,3 +175,7 @@ def _write_csv(path: Path, fieldnames: list[str], rows: list[dict]) -> None:
 
 def _bool(value: bool) -> str:
     return "true" if value else "false"
+
+
+def _is_true(value: object) -> bool:
+    return str(value).lower() in {"true", "1", "yes"}

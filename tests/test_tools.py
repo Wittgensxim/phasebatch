@@ -23,12 +23,14 @@ class ToolchainTests(unittest.TestCase):
                 "opt": "C:/llvm/opt.exe",
                 "llc": None,
                 "llvm-size": None,
+                "llvm-diff": None,
             }[name]
             with mock.patch("phasebatch.tools.run_version", return_value="LLVM version 23.0.0git"):
                 metadata = collect_toolchain()
 
         self.assertEqual(metadata["tools"]["clang"]["path"], "C:/llvm/clang.exe")
         self.assertIn("LLVM version 23.0.0git", metadata["tools"]["opt"]["version"])
+        self.assertIsNone(metadata["tools"]["llvm-diff"]["path"])
 
     def test_write_metadata_creates_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -36,3 +38,18 @@ class ToolchainTests(unittest.TestCase):
             data = json.loads((Path(tmp) / "metadata.json").read_text(encoding="utf-8"))
 
         self.assertEqual(data, {"hello": "world"})
+
+    def test_write_metadata_records_active_opt_backend_snapshot(self) -> None:
+        snapshot = {
+            "requested_mode": "worker",
+            "backend": "worker",
+            "worker_path": "C:/phasebatch-worker.exe",
+            "workers": 2,
+            "stats": {"requests": 7, "module_loads": 1},
+        }
+        with tempfile.TemporaryDirectory() as tmp, \
+            mock.patch("phasebatch.opt_backend.opt_backend_metadata", return_value=snapshot):
+            write_metadata(Path(tmp), {"hello": "world"})
+            data = json.loads((Path(tmp) / "metadata.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(data["opt_backend"], snapshot)

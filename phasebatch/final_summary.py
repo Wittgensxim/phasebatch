@@ -5,6 +5,7 @@ import json
 from collections import Counter
 from pathlib import Path
 
+from .equality_summary import equality_tier_markdown, equality_tier_summary_for_run
 from .schema import FINAL_SUMMARY_INDEX_FIELDS
 
 
@@ -29,6 +30,7 @@ def generate_final_summary(run_dir: Path) -> Path:
     enable_suppress = _read_csv(run_dir / "enable_suppress.csv")
     relation_flip = _read_csv(run_dir / "relation_flip.csv")
     replay = _first_row(run_dir / "pipeline_replay.csv")
+    validation_cost_rows = _read_csv(run_dir / "batch_validation_ladder_summary.csv")
     exact_status = _read_exact_status(run_dir / "exact_status.txt") or _first_value(optimize_summary, ["exact_status"])
     optimized_pipeline = _read_text(run_dir / "optimized_pipeline.txt").strip()
 
@@ -38,6 +40,9 @@ def generate_final_summary(run_dir: Path) -> Path:
         lines.extend(_warning_section(warnings))
     lines.extend(_run_configuration_section(metadata, optimize_summary, exact_status))
     lines.extend(_final_result_section(run_dir, chosen_summary, optimized_pipeline))
+    lines.extend(equality_tier_markdown(equality_tier_summary_for_run(run_dir)))
+    lines.append("")
+    lines.extend(_validation_cost_section(validation_cost_rows))
     lines.extend(_pipeline_replay_section(replay))
     lines.extend(_chosen_path_section(chosen_path))
     lines.extend(_executable_reason_section(chosen_path))
@@ -81,6 +86,7 @@ def _run_configuration_section(metadata: dict, optimize_summary: dict, exact_sta
         "beam_width",
         "max_states",
         "max_batches_per_state",
+        "budgeted_validation_strategy",
         "batch_selection_policy",
         "frontier_selection_policy",
         "selection_seed",
@@ -142,6 +148,28 @@ def _pipeline_replay_section(replay: dict) -> list[str]:
         lines.append(f"- error: {error}")
     lines.append("")
     return lines
+
+
+def _validation_cost_section(rows: list[dict]) -> list[str]:
+    if not rows:
+        return []
+    total = lambda field: sum(_to_int_or_none(row.get(field)) or 0 for row in rows)
+    validation_time = sum(_to_float(row.get("validation_time_ms")) for row in rows)
+    return [
+        "## Validation Cost",
+        "",
+        f"- validation opt invocations: {total('validation_opt_invocations')}",
+        "- validation pass invocations: "
+        f"{total('validation_pass_invocations_baseline')} baseline, "
+        f"{total('validation_pass_invocations_actual')} actual, "
+        f"{total('validation_pass_invocations_saved')} saved",
+        f"- profile reuse hits: {total('validation_profile_reuse_hits')}",
+        "- state cache hits: "
+        f"{total('validation_state_transition_cache_hits')} transitions, "
+        f"{total('validation_state_equivalence_cache_hits')} equivalence comparisons",
+        f"- validation time ms: {validation_time:.3f}",
+        "",
+    ]
 
 
 def _chosen_path_section(rows: list[dict]) -> list[str]:
@@ -317,6 +345,7 @@ def _artifact_section(run_dir: Path) -> list[str]:
         "final.ll",
         "baseline_results.csv",
         "pipeline_replay.csv",
+        "batch_validation_ladder_summary.csv",
         "replayed_final.ll",
         "state_dag.csv",
         "leaf_states.csv",
@@ -515,3 +544,10 @@ def _to_int_or_none(value: object) -> int | None:
         return int(float(str(value)))
     except (TypeError, ValueError):
         return None
+
+
+def _to_float(value: object) -> float:
+    try:
+        return float(str(value))
+    except (TypeError, ValueError):
+        return 0.0

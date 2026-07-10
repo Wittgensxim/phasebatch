@@ -4,8 +4,9 @@ import csv
 from collections import Counter
 from pathlib import Path
 
-from .cli import analyze_state
+from .equality_summary import equality_tier_markdown, equality_tier_summary_for_run
 from .normalizer import canonical_hash
+from .pair_cost import write_pair_cost_summary
 from .pass_config import load_pass_registry
 from .profiler import validate_passes
 from .runner import prepare_input_ir
@@ -16,6 +17,7 @@ from .schema import (
     STATE_FIELDS,
     STATE_TRANSITION_FIELDS,
 )
+from .state_analysis import analyze_state
 from .tools import collect_toolchain, write_metadata
 
 
@@ -196,6 +198,7 @@ def explore_states(
     aggregate_rows = _aggregate_by_depth(out_dir, program)
     _write_csv(out_dir / "aggregate_by_depth.csv", AGGREGATE_BY_DEPTH_FIELDS, aggregate_rows)
     _write_multistate_summary(out_dir / "multistate_summary.md", out_dir, aggregate_rows)
+    pair_cost = write_pair_cost_summary(out_dir)
     return {
         "program": program,
         "out_dir": str(out_dir),
@@ -207,15 +210,19 @@ def explore_states(
         "enable_suppress_csv": str(out_dir / "enable_suppress.csv"),
         "aggregate_by_depth_csv": str(out_dir / "aggregate_by_depth.csv"),
         "multistate_summary": str(out_dir / "multistate_summary.md"),
+        "pair_cost_summary_csv": pair_cost["pair_cost_summary_csv"],
+        "pair_cost_summary_md": pair_cost["pair_cost_summary_md"],
     }
 
 
 def _tool_paths(metadata: dict) -> dict[str, str]:
-    return {
+    tools = {
         name: details["path"]
         for name, details in metadata.get("tools", {}).items()
         if details.get("path")
     }
+    tools["_toolchain_metadata"] = metadata
+    return tools
 
 
 def _analyze_state(input_ll: Path, state_dir: Path, tools: dict, **kwargs) -> dict:
@@ -585,6 +592,9 @@ def _write_multistate_summary(
         "",
     ]
     lines.extend(_by_depth_table(aggregate_rows))
+    lines.extend([""])
+    lines.extend(equality_tier_markdown(equality_tier_summary_for_run(out_dir)))
+    lines.extend([""])
     lines.extend(["", "## Enable/Suppress", "", "Enable/suppress counts", ""])
     lines.extend(_counter_table(["relation", "count"], relation_counts))
     lines.extend(["", "Top transition_pass -> affected_pass", ""])

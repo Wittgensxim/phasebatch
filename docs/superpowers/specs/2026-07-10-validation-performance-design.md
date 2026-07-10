@@ -65,7 +65,7 @@ Profiling, pair testing, and validation currently run as separate phases, so the
 
 This context prevents nested candidate/order/DAG executors from running more than `jobs` external opt processes at once.
 
-A repository-wide runner service would touch profiling, pair testing, CEGAR, optimizer application, baselines, and replay. That larger refactor is deferred until measurements show that phase-local control is insufficient.
+A repository-wide runner service would touch profiling, pair testing, optimizer application, baselines, and replay. That larger refactor is deferred until measurements show that phase-local control is insufficient.
 
 ### 3. Parallel Batch Candidate Validation
 
@@ -275,7 +275,7 @@ Phase 1 tests cover:
 7. DAG `jobs=1` and `jobs=4` produce identical nodes, edges, status, and certificate;
 8. a parallel transition failure is reported using deterministic edge order;
 9. validation cost fields and optimizer total invocation accounting are exact;
-10. existing exhaustive, bounded, sampled, DAG, CEGAR, exact, and budgeted tests remain green.
+10. existing exhaustive, bounded, sampled, DAG, exact, and budgeted tests remain green.
 
 Phase 2 tests cover:
 
@@ -314,7 +314,7 @@ Performance evidence:
 ## Non-Goals
 
 - No persistent cross-run pair or validation cache in this change.
-- No change to CEGAR default status.
+- No change to pairwise construction semantics.
 - No weakening of `can_hard_fold` or `can_execute`.
 - No change to pairwise full-matrix semantics.
 - No automatic use of sampled or bounded validation.

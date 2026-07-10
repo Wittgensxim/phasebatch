@@ -5,6 +5,7 @@ import json
 from collections import Counter
 from pathlib import Path
 
+from .equality_summary import equality_tier_markdown, equality_tier_summary_from_rows
 from .schema import CLUSTER_DISTRIBUTION_FIELDS, PAIR_RELATION_FIELDS, PASS_PROFILE_FIELDS, PER_STATE_SUMMARY_FIELDS
 
 
@@ -48,6 +49,9 @@ def write_summary(out_dir: Path) -> Path:
     for name, count in sorted(final_counts.items()):
         if name:
             lines.append(f"| {name} | {count} |")
+
+    lines.extend([""])
+    lines.extend(equality_tier_markdown(equality_tier_summary_from_rows(pairs), heading="# Equality Tier Summary"))
 
     lines.extend(["", "# Top active passes", "", "| pass | inst_delta | blocks_changed | time_ms |", "| --- | ---: | ---: | ---: |"])
     for row in sorted(active, key=lambda item: int(item.get("blocks_changed") or 0), reverse=True)[:10]:
@@ -176,6 +180,9 @@ def write_aggregate_report(out_dir: Path, program_dirs: list[Path]) -> Path:
             "| {program} | {valid_passes} | {active_passes} | {pairs_tested} | {dynamic_commute} | "
             "{order_sensitive} | {unknown} | {max_conflict_component} | {total_time_ms} |".format(**row)
         )
+    pair_rows = _read_csv(out_dir / "pair_relation.csv")
+    lines.extend([""])
+    lines.extend(equality_tier_markdown(equality_tier_summary_from_rows(pair_rows), heading="# Equality Tier Summary"))
     path = out_dir / "aggregate_summary.md"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path

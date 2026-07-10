@@ -1,12 +1,322 @@
 import tempfile
 import unittest
+import os
 from pathlib import Path
 from unittest import mock
 
-from phasebatch.cli import analyze_state, run_analysis, run_batch, run_batchify, run_budgeted_sensitivity, run_compare_baselines, run_component_summary, run_core_v1_budgeted_study, run_core_v1_case_study, run_diagnose_paths, run_eval_batches, run_evidence_pack, run_explore_batches, run_method_comparison, run_optimize_batches, run_passset_smoke, run_reduction_study, run_replay_final_pipeline, run_reduction_summary, run_round_sensitivity, run_select_and_run_exact_reference, run_summarize_exact_reduction_study, run_summarize_passsets, run_v2_extension_study, run_v3_loop_smoke, run_visualize_dag
+from phasebatch import cli as cli_module
+from phasebatch.cli import (
+    analyze_state,
+    build_parser,
+    run_analysis,
+    run_batch,
+    run_batchify,
+    run_compare_baselines,
+    run_component_summary,
+    run_diagnose_paths,
+    run_eval_batches,
+    run_evidence_pack,
+    run_explore_batches,
+    run_optimize_batches,
+    run_replay_final_pipeline,
+    run_reduction_summary,
+    run_visualize_dag,
+)
 
 
 class CliPipelineTests(unittest.TestCase):
+    def test_advisor_report_parsers_use_stable_defaults(self) -> None:
+        parser = build_parser()
+        run_args = parser.parse_args(
+            [
+                "run-advisor-report-zh",
+                "--test-suite-root",
+                "suite",
+                "--out",
+                "out",
+                "--passes",
+                "passes.yaml",
+            ]
+        )
+        summarize_args = parser.parse_args(
+            ["summarize-advisor-report-zh", "--study-dir", "out"]
+        )
+
+        self.assertEqual(run_args.num_programs, 15)
+        self.assertEqual(run_args.jobs, 8)
+        self.assertEqual(run_args.timeout, 15)
+        self.assertEqual(run_args.max_pairs, 300)
+        self.assertEqual(run_args.pair_testing_mode, "full")
+        self.assertEqual(run_args.batch_construction_mode, "pairwise")
+        self.assertEqual(run_args.batch_validation_mode, "auto")
+        self.assertTrue(run_args.validate_batches)
+        self.assertEqual(run_args.opt_backend, "worker")
+        self.assertEqual(summarize_args.study_dir, "out")
+
+    def test_opt_backend_parser_defaults_worker_and_accepts_explicit_external(self) -> None:
+        parser = build_parser()
+        defaults = parser.parse_args(
+            ["optimize-batches", "--input", "in.ll", "--out", "out", "--passes", "passes.yaml"]
+        )
+        external = parser.parse_args(
+            [
+                "optimize-batches",
+                "--input",
+                "in.ll",
+                "--out",
+                "out",
+                "--passes",
+                "passes.yaml",
+                "--opt-backend",
+                "external",
+            ]
+        )
+        configured = parser.parse_args(
+            [
+                "optimize-batches",
+                "--input",
+                "in.ll",
+                "--out",
+                "out",
+                "--passes",
+                "passes.yaml",
+                "--opt-backend",
+                "worker",
+                "--opt-worker",
+                "phasebatch-worker.exe",
+                "--opt-workers",
+                "3",
+            ]
+        )
+
+        self.assertEqual(defaults.opt_backend, "worker")
+        self.assertIsNone(defaults.opt_worker)
+        self.assertIsNone(defaults.opt_workers)
+        self.assertEqual(external.opt_backend, "external")
+        self.assertEqual(configured.opt_backend, "worker")
+        self.assertEqual(configured.opt_worker, "phasebatch-worker.exe")
+        self.assertEqual(configured.opt_workers, 3)
+
+    def test_opt_backend_parser_reads_environment_defaults(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {
+                "PHASEBATCH_OPT_BACKEND": "worker",
+                "PHASEBATCH_OPT_WORKER": "configured-worker.exe",
+                "PHASEBATCH_OPT_WORKERS": "5",
+            },
+        ):
+            args = build_parser().parse_args(
+                ["analyze", "--input", "in.ll", "--out", "out", "--passes", "passes.yaml"]
+            )
+
+        self.assertEqual(args.opt_backend, "worker")
+        self.assertEqual(args.opt_worker, "configured-worker.exe")
+        self.assertEqual(args.opt_workers, 5)
+
+    def test_optimize_staged_supports_worker_backend_options(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "optimize-staged",
+                "--input",
+                "in.ll",
+                "--manifest",
+                "stages.yaml",
+                "--out",
+                "out",
+                "--jobs",
+                "4",
+                "--opt-backend",
+                "auto",
+            ]
+        )
+
+        self.assertEqual(args.opt_backend, "auto")
+        self.assertIsNone(args.opt_workers)
+
+    def test_direct_opt_commands_expose_worker_backend_options(self) -> None:
+        parser = build_parser()
+        commands = [
+            ["audit-passes", "--input", "in.ll", "--passes", "passes.yaml", "--out", "out"],
+            ["batchify", "--state-dir", "state"],
+            ["compare-baselines", "--run-dir", "run", "--passes", "passes.yaml"],
+            ["diagnose-paths", "--run-dir", "run"],
+            ["replay-final-pipeline", "--run-dir", "run"],
+        ]
+
+        for command in commands:
+            with self.subTest(command=command[0]):
+                args = parser.parse_args([*command, "--opt-backend", "worker"])
+                self.assertEqual(args.opt_backend, "worker")
+
+    def test_main_scopes_selected_backend_around_command(self) -> None:
+        with mock.patch("phasebatch.cli.opt_backend_session") as fake_session, \
+            mock.patch("phasebatch.cli._run_analyze", return_value=17) as fake_run:
+            result = cli_module.main(
+                [
+                    "analyze",
+                    "--input",
+                    "in.ll",
+                    "--out",
+                    "out",
+                    "--passes",
+                    "passes.yaml",
+                    "--jobs",
+                    "8",
+                    "--opt-backend",
+                    "worker",
+                    "--opt-worker",
+                    "phasebatch-worker.exe",
+                    "--opt-workers",
+                    "3",
+                ]
+            )
+
+        self.assertEqual(result, 17)
+        fake_session.assert_called_once_with(
+            "worker",
+            worker_path="phasebatch-worker.exe",
+            workers=3,
+        )
+        fake_run.assert_called_once()
+
+    def test_verify_opt_worker_parser_and_exit_status(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "verify-opt-worker",
+                "--inputs",
+                "one.ll",
+                "two.c",
+                "--passes",
+                "passes.yaml",
+                "--out",
+                "out",
+                "--opt-worker",
+                "phasebatch-worker.exe",
+                "--opt-workers",
+                "2",
+                "--max-passes",
+                "7",
+            ]
+        )
+
+        self.assertEqual(args.inputs, ["one.ll", "two.c"])
+        self.assertEqual(args.opt_workers, 2)
+        self.assertEqual(args.max_passes, 7)
+
+        with mock.patch(
+            "phasebatch.cli.verify_opt_worker_impl",
+            return_value={
+                "status": "failed",
+                "rows": 3,
+                "failed_cases": 1,
+                "worker_differential_md": "out/worker_differential.md",
+            },
+        ) as fake_verify:
+            exit_code = args.func(args)
+
+        self.assertEqual(exit_code, 1)
+        fake_verify.assert_called_once()
+
+    def test_benchmark_opt_worker_parser_and_exit_status(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "benchmark-opt-worker",
+                "--input",
+                "input.c",
+                "--out",
+                "out",
+                "--opt-worker",
+                "phasebatch-worker.exe",
+                "--iterations",
+                "50",
+            ]
+        )
+        self.assertEqual(args.iterations, 50)
+
+        with mock.patch(
+            "phasebatch.cli.benchmark_opt_worker_impl",
+            return_value={
+                "acceptance_status": "passed",
+                "speedup": "5.000",
+                "samples": 400,
+                "worker_benchmark_md": "out/worker_benchmark.md",
+            },
+        ) as benchmark:
+            exit_code = args.func(args)
+
+        self.assertEqual(exit_code, 0)
+        benchmark.assert_called_once()
+
+    def test_optimize_parser_supports_explicit_root_ir_mode(self) -> None:
+        parser = build_parser()
+        defaults = parser.parse_args(
+            ["optimize-batches", "--input", "in.c", "--out", "out", "--passes", "passes.yaml"]
+        )
+        configured = parser.parse_args(
+            [
+                "optimize-batches",
+                "--input",
+                "in.c",
+                "--out",
+                "out",
+                "--passes",
+                "passes.yaml",
+                "--root-ir-mode",
+                "inlinable-unoptimized",
+            ]
+        )
+
+        self.assertEqual(defaults.root_ir_mode, "legacy-o0")
+        self.assertEqual(configured.root_ir_mode, "inlinable-unoptimized")
+
+    def test_optimize_parser_defaults_budgeted_validation_to_all(self) -> None:
+        parser = build_parser()
+        defaults = parser.parse_args(
+            ["optimize-batches", "--input", "in.ll", "--out", "out", "--passes", "passes.yaml"]
+        )
+        configured = parser.parse_args(
+            [
+                "optimize-batches",
+                "--input",
+                "in.ll",
+                "--out",
+                "out",
+                "--passes",
+                "passes.yaml",
+                "--budgeted-validation-strategy",
+                "on-demand",
+            ]
+        )
+
+        self.assertEqual(defaults.budgeted_validation_strategy, "all")
+        self.assertEqual(configured.budgeted_validation_strategy, "on-demand")
+
+    def test_optimize_parser_accepts_only_pairwise_batch_construction(self) -> None:
+        parser = build_parser()
+        defaults = parser.parse_args(
+            ["optimize-batches", "--input", "in.ll", "--out", "out", "--passes", "passes.yaml"]
+        )
+
+        self.assertEqual(defaults.batch_construction_mode, "pairwise")
+        with self.assertRaises(SystemExit):
+            parser.parse_args(
+                [
+                    "optimize-batches",
+                    "--input",
+                    "in.ll",
+                    "--out",
+                    "out",
+                    "--passes",
+                    "passes.yaml",
+                    "--batch-construction-mode",
+                    "cegar",
+                ]
+            )
+
     def test_analyze_state_connects_pipeline_outputs_without_preparing_input(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -14,9 +324,8 @@ class CliPipelineTests(unittest.TestCase):
             input_ll.write_text("define i32 @f() {\n  ret i32 0\n}\n", encoding="utf-8")
             out_dir = root / "out"
 
-            with mock.patch("phasebatch.cli.prepare_input_ir") as fake_prepare, \
-                mock.patch("phasebatch.cli.profile_passes", return_value=[{"program": "out", "state_id": "S0001", "depth": 1, "parent_state_id": "S0000", "transition_pass": "mem2reg", "state_hash": "s", "pass": "instcombine", "active": "true", "changed_functions": "f", "changed_blocks": "f::entry"}]) as fake_profile, \
-                mock.patch("phasebatch.cli.run_pair_tests", return_value=[]):
+            with mock.patch("phasebatch.state_analysis.profile_passes", return_value=[{"program": "out", "state_id": "S0001", "depth": 1, "parent_state_id": "S0000", "transition_pass": "mem2reg", "state_hash": "s", "pass": "instcombine", "active": "true", "changed_functions": "f", "changed_blocks": "f::entry"}]) as fake_profile, \
+                mock.patch("phasebatch.state_analysis.run_pair_tests", return_value=[]):
                 result = analyze_state(
                     input_ll,
                     out_dir,
@@ -34,13 +343,15 @@ class CliPipelineTests(unittest.TestCase):
                     transition_pass="mem2reg",
                 )
 
-            fake_prepare.assert_not_called()
             fake_profile.assert_called_once()
             self.assertEqual(fake_profile.call_args.kwargs["state_id"], "S0001")
+            self.assertTrue((out_dir / "pair_cost_summary.csv").exists())
+            self.assertTrue((out_dir / "pair_cost_summary.md").exists())
 
         self.assertEqual(result["program"], "out")
         self.assertEqual(result["state_id"], "S0001")
         self.assertTrue(result["summary_path"].endswith("summary.md"))
+        self.assertTrue(result["pair_cost_summary_csv"].endswith("pair_cost_summary.csv"))
 
     def test_run_analysis_prepares_input_validates_once_and_calls_root_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -185,6 +496,7 @@ class CliPipelineTests(unittest.TestCase):
             batch_frontier_policy="largest-batch",
             validate_batches=True,
             allow_sampled_batches=True,
+            batch_construction_mode="pairwise",
         )
         self.assertEqual(result["batch_transitions"], 1)
 
@@ -235,202 +547,6 @@ class CliPipelineTests(unittest.TestCase):
         )
         self.assertEqual(result["rows"], 5)
 
-    def test_run_method_comparison_calls_runner(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            out_dir = root / "out"
-            passes_path = root / "passes.yaml"
-
-            with mock.patch("phasebatch.cli.run_method_comparison_impl", return_value={"programs": 2}) as fake_run:
-                result = run_method_comparison(
-                    ["a.c", "b.ll"],
-                    out_dir,
-                    passes_path,
-                    optimizer_mode="budgeted",
-                    objective="ir-inst-count",
-                    max_rounds=3,
-                    beam_width=4,
-                    max_states=500,
-                    max_batches_per_state=10,
-                    batch_frontier_policy="score",
-                    validate_batches=True,
-                    baseline_max_rounds=5,
-                    random_trials=20,
-                    seed=7,
-                    include_default_pipelines=True,
-                    jobs=8,
-                    timeout=10,
-                    max_pairs=300,
-                    overwrite=True,
-                    continue_on_error=True,
-                )
-
-        fake_run.assert_called_once_with(
-            ["a.c", "b.ll"],
-            out_dir,
-            passes_path,
-            optimizer_mode="budgeted",
-            objective="ir-inst-count",
-            max_rounds=3,
-            beam_width=4,
-            max_states=500,
-            max_batches_per_state=10,
-            batch_frontier_policy="score",
-            validate_batches=True,
-            baseline_max_rounds=5,
-            random_trials=20,
-            seed=7,
-            include_default_pipelines=True,
-            jobs=8,
-            timeout=10,
-            max_pairs=300,
-            overwrite=True,
-            continue_on_error=True,
-        )
-        self.assertEqual(result["programs"], 2)
-
-    def test_run_round_sensitivity_calls_runner(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            input_path = root / "input.c"
-            out_dir = root / "out"
-            passes_path = root / "passes.yaml"
-
-            with mock.patch("phasebatch.cli.run_round_sensitivity_impl", return_value={"rows": 3}) as fake_run:
-                result = run_round_sensitivity(
-                    input_path,
-                    out_dir,
-                    passes_path,
-                    rounds=[2, 3, 4],
-                    optimizer_mode="exact",
-                    objective="ir-inst-count",
-                    beam_width=8,
-                    max_states=5000,
-                    max_batches_per_state=20,
-                    batch_frontier_policy="score",
-                    validate_batches=True,
-                    jobs=8,
-                    timeout=10,
-                    max_pairs=300,
-                    overwrite=True,
-                )
-
-        fake_run.assert_called_once_with(
-            input_path,
-            out_dir,
-            passes_path,
-            rounds=[2, 3, 4],
-            optimizer_mode="exact",
-            objective="ir-inst-count",
-            beam_width=8,
-            max_states=5000,
-            max_batches_per_state=20,
-            batch_frontier_policy="score",
-            validate_batches=True,
-            jobs=8,
-            timeout=10,
-            max_pairs=300,
-            overwrite=True,
-        )
-        self.assertEqual(result["rows"], 3)
-
-    def test_run_passset_smoke_calls_runner(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            out_dir = root / "out"
-            passsets = [root / "core_passes_v1.yaml", root / "scalar_passes_v2.yaml"]
-
-            with mock.patch("phasebatch.cli.run_passset_smoke_impl", return_value={"runs": 2}) as fake_run:
-                result = run_passset_smoke(
-                    ["a.c", "b.c"],
-                    passsets,
-                    out_dir,
-                    optimizer_mode="exact",
-                    objective="ir-inst-count",
-                    max_rounds=2,
-                    beam_width=8,
-                    max_states=5000,
-                    max_batches_per_state=20,
-                    batch_frontier_policy="score",
-                    validate_batches=True,
-                    jobs=8,
-                    timeout=10,
-                    max_pairs=600,
-                    overwrite=True,
-                    continue_on_error=True,
-                )
-
-        fake_run.assert_called_once_with(
-            ["a.c", "b.c"],
-            passsets,
-            out_dir,
-            optimizer_mode="exact",
-            objective="ir-inst-count",
-            max_rounds=2,
-            beam_width=8,
-            max_states=5000,
-            max_batches_per_state=20,
-            batch_frontier_policy="score",
-            validate_batches=True,
-            jobs=8,
-            timeout=10,
-            max_pairs=600,
-            overwrite=True,
-            continue_on_error=True,
-        )
-        self.assertEqual(result["runs"], 2)
-
-    def test_run_v2_extension_study_calls_runner(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            out_dir = root / "out"
-            v1 = root / "core_passes.yaml"
-            v2 = root / "scalar_passes_v2.yaml"
-
-            with mock.patch("phasebatch.cli.run_v2_extension_study_impl", return_value={"programs": 2}) as fake_run:
-                result = run_v2_extension_study(
-                    ["a.c", "b.c"],
-                    out_dir,
-                    v1,
-                    v2,
-                    objective="ir-inst-count",
-                    max_rounds=4,
-                    beam_width=4,
-                    max_states=500,
-                    max_batches_per_state=20,
-                    batch_frontier_policy="score",
-                    validate_batches=True,
-                    jobs=8,
-                    timeout=10,
-                    max_pairs=600,
-                    random_trials=20,
-                    seed=0,
-                    overwrite=True,
-                    continue_on_error=True,
-                )
-
-        fake_run.assert_called_once_with(
-            ["a.c", "b.c"],
-            out_dir,
-            v1,
-            v2,
-            objective="ir-inst-count",
-            max_rounds=4,
-            beam_width=4,
-            max_states=500,
-            max_batches_per_state=20,
-            batch_frontier_policy="score",
-            validate_batches=True,
-            jobs=8,
-            timeout=10,
-            max_pairs=600,
-            random_trials=20,
-            seed=0,
-            overwrite=True,
-            continue_on_error=True,
-        )
-        self.assertEqual(result["programs"], 2)
-
     def test_run_visualize_dag_calls_runner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -458,64 +574,6 @@ class CliPipelineTests(unittest.TestCase):
             include_depth_overview=True,
         )
         self.assertEqual(result["unique_states"], 3)
-
-    def test_run_v3_loop_smoke_calls_runner(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            out_dir = root / "out"
-            passes_path = root / "middleend_passes_v3.yaml"
-
-            with mock.patch("phasebatch.cli.run_v3_loop_smoke_impl", return_value={"programs_attempted": 2}) as fake_run:
-                result = run_v3_loop_smoke(
-                    ["loop.c", "n-body.c"],
-                    out_dir,
-                    passes_path,
-                    optimizer_mode="budgeted",
-                    objective="ir-inst-count",
-                    max_rounds=3,
-                    beam_width=4,
-                    max_states=800,
-                    max_batches_per_state=12,
-                    batch_frontier_policy="score",
-                    validate_batches=True,
-                    jobs=8,
-                    timeout=10,
-                    max_pairs=1000,
-                    overwrite=True,
-                    continue_on_error=True,
-                )
-
-        fake_run.assert_called_once_with(
-            ["loop.c", "n-body.c"],
-            out_dir,
-            passes_path,
-            optimizer_mode="budgeted",
-            objective="ir-inst-count",
-            max_rounds=3,
-            beam_width=4,
-            max_states=800,
-            max_batches_per_state=12,
-            batch_frontier_policy="score",
-            validate_batches=True,
-            jobs=8,
-            timeout=10,
-            max_pairs=1000,
-            overwrite=True,
-            continue_on_error=True,
-        )
-        self.assertEqual(result["programs_attempted"], 2)
-
-    def test_run_summarize_passsets_calls_reporter(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            out_dir = root / "report"
-            inputs = [root / "passset", root / "v3"]
-
-            with mock.patch("phasebatch.cli.summarize_passsets_impl", return_value={"matrix_rows": 3}) as fake_summary:
-                result = run_summarize_passsets(inputs, out_dir)
-
-        fake_summary.assert_called_once_with(inputs, out_dir)
-        self.assertEqual(result["matrix_rows"], 3)
 
     def test_run_reduction_summary_calls_reporter(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -548,238 +606,6 @@ class CliPipelineTests(unittest.TestCase):
         fake_diagnose.assert_called_once_with(run_dir, baseline_dir=baseline_dir, timeout=7)
         self.assertEqual(result["methods"], 4)
 
-    def test_run_reduction_study_calls_runner(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            out_dir = root / "out"
-            passes_path = root / "passes.yaml"
-
-            with mock.patch("phasebatch.cli.run_reduction_study_impl", return_value={"programs": 2}) as fake_run:
-                result = run_reduction_study(
-                    ["a.c", "b.c"],
-                    out_dir,
-                    passes_path,
-                    optimizer_mode="exact",
-                    objective="ir-inst-count",
-                    max_rounds=2,
-                    max_states=5000,
-                    validate_batches=True,
-                    jobs=8,
-                    timeout=10,
-                    max_pairs=300,
-                    overwrite=True,
-                    continue_on_error=True,
-                )
-
-        fake_run.assert_called_once_with(
-            ["a.c", "b.c"],
-            out_dir,
-            passes_path,
-            optimizer_mode="exact",
-            objective="ir-inst-count",
-            max_rounds=2,
-            max_states=5000,
-            validate_batches=True,
-            jobs=8,
-            timeout=10,
-            max_pairs=300,
-            summarize_components=False,
-            overwrite=True,
-            continue_on_error=True,
-        )
-        self.assertEqual(result["programs"], 2)
-
-    def test_run_budgeted_sensitivity_calls_runner(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            out_dir = root / "out"
-            passes_path = root / "passes.yaml"
-            exact_reference = root / "reference.csv"
-
-            with mock.patch("phasebatch.cli.run_budgeted_sensitivity_impl", return_value={"attempted_runs": 4}) as fake_run:
-                result = run_budgeted_sensitivity(
-                    ["a.c", "b.c"],
-                    out_dir,
-                    passes_path,
-                    objective="ir-inst-count",
-                    max_rounds=4,
-                    beam_widths=[4, 8],
-                    max_states_list=[100, 200],
-                    max_batches_per_state=20,
-                    batch_frontier_policy="score",
-                    validate_batches=True,
-                    jobs=8,
-                    timeout=10,
-                    max_pairs=300,
-                    exact_reference=exact_reference,
-                    overwrite=True,
-                    continue_on_error=True,
-                )
-
-        fake_run.assert_called_once_with(
-            ["a.c", "b.c"],
-            out_dir,
-            passes_path,
-            objective="ir-inst-count",
-            max_rounds=4,
-            beam_widths=[4, 8],
-            max_states_list=[100, 200],
-            max_batches_per_state=20,
-            batch_frontier_policy="score",
-            validate_batches=True,
-            jobs=8,
-            timeout=10,
-            max_pairs=300,
-            exact_reference=exact_reference,
-            summarize_components=False,
-            overwrite=True,
-            continue_on_error=True,
-        )
-        self.assertEqual(result["attempted_runs"], 4)
-
-    def test_run_core_v1_budgeted_study_calls_runner(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            out_dir = root / "out"
-            passes_path = root / "passes.yaml"
-
-            with mock.patch("phasebatch.cli.run_core_v1_budgeted_study_impl", return_value={"programs": 3}) as fake_run:
-                result = run_core_v1_budgeted_study(
-                    ["a.c", "b.ll"],
-                    out_dir,
-                    passes_path,
-                    objective="ir-inst-count",
-                    max_rounds=4,
-                    beam_width=4,
-                    max_states=500,
-                    max_batches_per_state=20,
-                    batch_frontier_policy="score",
-                    validate_batches=True,
-                    jobs=8,
-                    timeout=10,
-                    max_pairs=300,
-                    baseline_methods=["default", "greedy", "random", "batch"],
-                    random_trials=20,
-                    seed=0,
-                    overwrite=True,
-                    continue_on_error=True,
-                )
-
-        fake_run.assert_called_once_with(
-            ["a.c", "b.ll"],
-            out_dir,
-            passes_path,
-            objective="ir-inst-count",
-            max_rounds=4,
-            beam_width=4,
-            max_states=500,
-            max_batches_per_state=20,
-            batch_frontier_policy="score",
-            validate_batches=True,
-            jobs=8,
-            timeout=10,
-            max_pairs=300,
-            baseline_methods=["default", "greedy", "random", "batch"],
-            random_trials=20,
-            seed=0,
-            overwrite=True,
-            continue_on_error=True,
-        )
-        self.assertEqual(result["programs"], 3)
-
-    def test_run_select_and_run_exact_reference_calls_runner(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            budgeted_dir = root / "budgeted"
-            out_dir = root / "out"
-            passes_path = root / "passes.yaml"
-
-            with mock.patch("phasebatch.cli.select_and_run_exact_reference_impl", return_value={"selected_programs": 3}) as fake_run:
-                result = run_select_and_run_exact_reference(
-                    budgeted_dir,
-                    out_dir,
-                    passes_path,
-                    objective="ir-inst-count",
-                    max_rounds=4,
-                    max_states=5000,
-                    validate_batches=True,
-                    jobs=8,
-                    timeout=10,
-                    max_pairs=300,
-                    num_easy=1,
-                    num_medium=1,
-                    num_hard=1,
-                    overwrite=True,
-                    continue_on_error=True,
-                )
-
-        fake_run.assert_called_once_with(
-            budgeted_dir,
-            out_dir,
-            passes_path,
-            objective="ir-inst-count",
-            max_rounds=4,
-            max_states=5000,
-            validate_batches=True,
-            jobs=8,
-            timeout=10,
-            max_pairs=300,
-            num_easy=1,
-            num_medium=1,
-            num_hard=1,
-            overwrite=True,
-            continue_on_error=True,
-        )
-        self.assertEqual(result["selected_programs"], 3)
-
-    def test_run_summarize_exact_reduction_study_calls_reporter(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            out_dir = root / "out"
-            run_dirs = [root / "a" / "optimize", root / "b" / "optimize"]
-            root_dir = root / "runs"
-
-            with mock.patch("phasebatch.cli.summarize_exact_reduction_study_impl", return_value={"programs": 2}) as fake_summary:
-                result = run_summarize_exact_reduction_study(run_dirs, out_dir, label="exact_r4_core", root_dir=root_dir)
-
-        fake_summary.assert_called_once_with(run_dirs, out_dir, label="exact_r4_core", root_dir=root_dir, summarize_components=False)
-        self.assertEqual(result["programs"], 2)
-
-    def test_run_core_v1_case_study_calls_reporter(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            method = root / "method.csv"
-            reduction = root / "reduction.md"
-            budgeted = root / "budgeted.md"
-            out_dir = root / "out"
-            nbody = root / "nbody.md"
-            puzzle = root / "puzzle.md"
-            notes = root / "notes.md"
-
-            with mock.patch("phasebatch.cli.summarize_core_v1_case_study_impl", return_value={"programs": 5}) as fake_summary:
-                result = run_core_v1_case_study(
-                    method,
-                    reduction,
-                    budgeted,
-                    out_dir,
-                    label="core_v1_exact_r4",
-                    nbody_round_study=nbody,
-                    puzzle_case_study=puzzle,
-                    extra_notes=notes,
-                )
-
-        fake_summary.assert_called_once_with(
-            method,
-            reduction,
-            budgeted,
-            out_dir,
-            label="core_v1_exact_r4",
-            nbody_round_study=nbody,
-            puzzle_case_study=puzzle,
-            extra_notes=notes,
-        )
-        self.assertEqual(result["programs"], 5)
-
     def test_run_component_summary_calls_reporter_for_single_and_multi_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -806,6 +632,7 @@ class CliPipelineTests(unittest.TestCase):
             input_path = root / "input.ll"
             out_dir = root / "out"
             passes_path = root / "passes.yaml"
+            llvm_diff = root / "llvm-diff"
 
             with mock.patch("phasebatch.optimizer.optimize_batches", return_value={"states": 1}) as fake_optimize:
                 result = run_optimize_batches(
@@ -817,21 +644,41 @@ class CliPipelineTests(unittest.TestCase):
                     max_rounds=2,
                     beam_width=4,
                     max_batches_per_state=5,
+                    budgeted_validation_strategy="on-demand",
+                    max_component_size=17,
+                    max_batch_candidates=23,
+                    batchify_terminal_states=False,
                     validate_batches=True,
                     allow_sampled_batches=False,
+                    pair_testing_mode="lazy",
+                    pair_test_budget_per_state=7,
+                    pair_priority_policy="effect-size",
+                    batch_construction_mode="pairwise",
                     jobs=1,
                     timeout=10,
                     max_pairs=20,
                     batch_selection_policy="score",
                     frontier_selection_policy="objective",
                     verify_final_pipeline=False,
+                    llvm_diff=llvm_diff,
+                    root_ir_mode="inlinable-unoptimized",
                 )
 
         fake_optimize.assert_called_once()
         kwargs = fake_optimize.call_args.kwargs
         self.assertEqual(kwargs["batch_selection_policy"], "score")
         self.assertEqual(kwargs["frontier_selection_policy"], "objective")
+        self.assertEqual(kwargs["budgeted_validation_strategy"], "on-demand")
+        self.assertEqual(kwargs["max_component_size"], 17)
+        self.assertEqual(kwargs["max_batch_candidates"], 23)
+        self.assertEqual(kwargs["batchify_terminal_states"], False)
         self.assertEqual(kwargs["verify_final_pipeline"], False)
+        self.assertEqual(kwargs["llvm_diff"], llvm_diff)
+        self.assertEqual(kwargs["root_ir_mode"], "inlinable-unoptimized")
+        self.assertEqual(kwargs["pair_testing_mode"], "lazy")
+        self.assertEqual(kwargs["pair_test_budget_per_state"], 7)
+        self.assertEqual(kwargs["pair_priority_policy"], "effect-size")
+        self.assertEqual(kwargs["batch_construction_mode"], "pairwise")
         self.assertEqual(result["states"], 1)
 
     def test_run_replay_final_pipeline_calls_replay_layer(self) -> None:

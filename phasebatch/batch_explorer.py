@@ -5,9 +5,10 @@ from collections import Counter
 from pathlib import Path
 
 from .batch_correctness import classify_batch_correctness, skip_reason_for_correctness
+from .batch_validation_ladder import write_batch_validation_ladder_summary
 from .batcher import build_batch_family, validate_batch_candidates
-from .cli import analyze_state
 from .coverage import build_coverage_report
+from .equality_summary import equality_tier_markdown, equality_tier_summary_from_rows
 from .explorer import (
     _aggregate_by_depth,
     _bool,
@@ -25,6 +26,7 @@ from .explorer import (
 )
 from .footprint import build_footprint_overlap, write_aggregate_overlap_summary
 from .normalizer import canonical_hash
+from .pair_cost import write_pair_cost_summary
 from .pass_config import PassRegistry, load_pass_registry, resolve_pipeline_sequence
 from .profiler import validate_passes
 from .runner import prepare_input_ir, run_opt
@@ -39,6 +41,7 @@ from .schema import (
     STATE_FIELDS,
     STATE_TRANSITION_FIELDS,
 )
+from .state_analysis import analyze_state
 from .tools import collect_toolchain, write_metadata
 
 
@@ -54,10 +57,21 @@ def explore_batches(
     max_batch_candidates: int,
     validate_batches: bool,
     allow_sampled_batches: bool = False,
+    allow_bounded_validation: bool = False,
+    batch_validation_mode: str = "auto",
+    max_permutation_factorial: int = 120,
+    max_validation_sequences: int = 200,
+    max_validation_dag_nodes: int = 5000,
+    max_validation_dag_edges: int = 20000,
+    dump_validation_dag: bool = False,
+    validation_dag_selected_only: bool = False,
     max_batches_per_state: int = 20,
     max_frontier_states: int = 20,
     batch_frontier_policy: str = "all",
+    batch_construction_mode: str = "pairwise",
 ) -> dict:
+    if batch_construction_mode != "pairwise":
+        raise ValueError("batch construction only supports pairwise")
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     states_dir = out_dir / "states"
@@ -84,12 +98,37 @@ def explore_batches(
             "batch_frontier_policy": batch_frontier_policy,
             "validate_batches": validate_batches,
             "allow_sampled_batches": allow_sampled_batches,
+            "allow_bounded_validation": allow_bounded_validation,
+            "batch_validation_mode": batch_validation_mode,
+            "max_permutation_factorial": max_permutation_factorial,
+            "max_validation_sequences": max_validation_sequences,
+            "max_validation_dag_nodes": max_validation_dag_nodes,
+            "max_validation_dag_edges": max_validation_dag_edges,
+            "dump_validation_dag": dump_validation_dag,
+            "validation_dag_selected_only": validation_dag_selected_only,
+            "batch_construction_mode": batch_construction_mode,
             "exploration_mode": "batches",
         }
     )
     write_metadata(out_dir, metadata)
     tools = _tool_paths(metadata)
     tools["_pass_registry"] = pass_registry
+    construction_options = {
+        "batch_construction_mode": batch_construction_mode,
+        "validate_batches": validate_batches,
+        "timeout": timeout,
+        "jobs": jobs,
+        "max_component_size": max_component_size,
+        "max_batch_candidates": max_batch_candidates,
+        "batch_validation_mode": batch_validation_mode,
+        "max_permutation_factorial": max_permutation_factorial,
+        "max_validation_sequences": max_validation_sequences,
+        "max_validation_dag_nodes": max_validation_dag_nodes,
+        "max_validation_dag_edges": max_validation_dag_edges,
+        "dump_validation_dag": dump_validation_dag,
+        "validation_dag_selected_only": validation_dag_selected_only,
+        "_constructed_state_dirs": set(),
+    }
 
     prepared_ir = prepare_input_ir(Path(input_path), out_dir, tools, timeout)
     valid_passes, invalid_rows = validate_passes(prepared_ir, configured_passes, tools, out_dir, timeout, pass_registry=pass_registry)
@@ -149,18 +188,18 @@ def explore_batches(
         next_frontier: list[dict] = []
         for parent in frontier:
             parent_dir = Path(parent["state_dir"])
-            parent_batch_result = build_batch_family(
+            parent_batch_result = _construct_batch_family(
                 parent_dir,
-                max_component_size=max_component_size,
-                max_batch_candidates=max_batch_candidates,
+                tools,
+                pass_registry,
+                **construction_options,
             )
             if parent["state_id"] == "S0000":
                 root_batch_result = parent_batch_result
-            if validate_batches:
-                validate_batch_candidates(parent_dir, tools, timeout=timeout, jobs=jobs)
             correctness_rows = classify_batch_correctness(
                 parent_dir,
                 allow_sampled_batches=allow_sampled_batches,
+                allow_bounded_validation=allow_bounded_validation,
             )
             build_footprint_overlap(parent_dir)
             build_coverage_report(parent_dir)
@@ -198,6 +237,7 @@ def explore_batches(
                     depth=depth,
                     validate_batches=validate_batches,
                     allow_sampled_batches=allow_sampled_batches,
+                    allow_bounded_validation=allow_bounded_validation,
                     correctness_map=correctness_map,
                     hash_to_state_id=hash_to_state_id,
                     canonical_rows_by_id=canonical_rows_by_id,
@@ -211,6 +251,7 @@ def explore_batches(
                     max_component_size=max_component_size,
                     max_batch_candidates=max_batch_candidates,
                     max_depth=max_depth,
+                    construction_options=construction_options,
                 )
                 next_state_number = result["next_state_number"]
                 if result["frontier_row"]:
@@ -223,14 +264,17 @@ def explore_batches(
         )
 
     if not root_batch_result:
-        root_batch_result = build_batch_family(
+        root_batch_result = _construct_batch_family(
             root_dir,
-            max_component_size=max_component_size,
-            max_batch_candidates=max_batch_candidates,
+            tools,
+            pass_registry,
+            **construction_options,
         )
-        if validate_batches:
-            validate_batch_candidates(root_dir, tools, timeout=timeout, jobs=jobs)
-        classify_batch_correctness(root_dir, allow_sampled_batches=allow_sampled_batches)
+        classify_batch_correctness(
+            root_dir,
+            allow_sampled_batches=allow_sampled_batches,
+            allow_bounded_validation=allow_bounded_validation,
+        )
         build_footprint_overlap(root_dir)
         build_coverage_report(root_dir, terminal_not_validated=max_depth <= 0)
         total_batch_candidates = int(root_batch_result.get("batch_candidates", 0) or 0)
@@ -261,11 +305,21 @@ def explore_batches(
         selected_batch_candidates=selected_batch_candidates,
         validate_batches=validate_batches,
         allow_sampled_batches=allow_sampled_batches,
+        allow_bounded_validation=allow_bounded_validation,
         aggregate_batch_rows=aggregate_batch_rows,
         correctness_rows=correctness_rows,
         aggregate_coverage_rows=aggregate_coverage_rows,
         aggregate_overlap_rows=aggregate_overlap_rows,
     )
+    pair_cost = write_pair_cost_summary(out_dir)
+    validation_ladder = write_batch_validation_ladder_summary(out_dir)
+    pair_matrix_complete = all(
+        _state_pair_matrix_complete(Path(row["state_dir"]))
+        for row in state_rows
+        if row.get("state_dir") and row.get("is_duplicate") != "true"
+    )
+    metadata["pair_matrix_complete"] = pair_matrix_complete
+    write_metadata(out_dir, metadata)
     return {
         "program": program,
         "out_dir": str(out_dir),
@@ -282,6 +336,11 @@ def explore_batches(
         "aggregate_overlap_summary_csv": str(out_dir / "aggregate_overlap_summary.csv"),
         "multistate_summary": str(out_dir / "multistate_summary.md"),
         "batch_explore_summary": str(out_dir / "batch_explore_summary.md"),
+        "pair_cost_summary_csv": pair_cost["pair_cost_summary_csv"],
+        "pair_cost_summary_md": pair_cost["pair_cost_summary_md"],
+        "batch_validation_ladder_summary_csv": validation_ladder["batch_validation_ladder_summary_csv"],
+        "batch_validation_ladder_summary_md": validation_ladder["batch_validation_ladder_summary_md"],
+        "pair_matrix_complete": _bool(pair_matrix_complete),
     }
 
 
@@ -303,6 +362,7 @@ def _apply_batch_candidate(
     depth: int,
     validate_batches: bool,
     allow_sampled_batches: bool,
+    allow_bounded_validation: bool,
     correctness_map: dict[str, dict],
     hash_to_state_id: dict[str, str],
     canonical_rows_by_id: dict[str, dict],
@@ -316,6 +376,7 @@ def _apply_batch_candidate(
     max_component_size: int,
     max_batch_candidates: int,
     max_depth: int,
+    construction_options: dict,
 ) -> dict:
     correctness = correctness_map.get(
         candidate.get("batch_id", ""),
@@ -387,12 +448,19 @@ def _apply_batch_candidate(
             parent_state_id=parent["state_id"],
             transition_pass=batch_passes,
         )
-        build_batch_family(
+        terminal_options = dict(construction_options)
+        terminal_options["run_validation"] = False
+        _construct_batch_family(
             child_dir,
-            max_component_size=max_component_size,
-            max_batch_candidates=max_batch_candidates,
+            tools,
+            pass_registry if isinstance(pass_registry, PassRegistry) else None,
+            **terminal_options,
         )
-        classify_batch_correctness(child_dir, allow_sampled_batches=allow_sampled_batches)
+        classify_batch_correctness(
+            child_dir,
+            allow_sampled_batches=allow_sampled_batches,
+            allow_bounded_validation=allow_bounded_validation,
+        )
         build_footprint_overlap(child_dir)
         build_coverage_report(child_dir, terminal_not_validated=depth >= max_depth)
         child_row = _state_row_from_summary(
@@ -439,6 +507,22 @@ def _analyze_state(input_ll: Path, state_dir: Path, tools: dict, **kwargs) -> di
         fallback = dict(kwargs)
         fallback.pop("pass_registry", None)
         return analyze_state(input_ll, state_dir, tools, **fallback)
+
+
+def _state_pair_matrix_complete(state_dir: Path) -> bool:
+    active = [
+        row
+        for row in _read_csv(Path(state_dir) / "pass_profile.csv")
+        if row.get("success") == "true" and row.get("active") == "true" and row.get("pass")
+    ]
+    expected = len(active) * (len(active) - 1) // 2
+    rows = _read_csv(Path(state_dir) / "pair_relation.csv")
+    return len(rows) == expected and not any(
+        row.get("dynamic_relation") == "not_tested"
+        or row.get("failure_kind") in {"lazy_budget", "max_pairs"}
+        or row.get("skipped_by_budget") == "true"
+        for row in rows
+    )
 
 
 def _materialize_state_input(state_dir: Path, source_ir: Path) -> Path:
@@ -671,6 +755,102 @@ def _avg_batch_metric(values: list[float]) -> float:
     return sum(values) / len(values)
 
 
+def _construct_batch_family(
+    state_dir: Path,
+    tools: dict,
+    pass_registry: PassRegistry | None,
+    *,
+    batch_construction_mode: str,
+    validate_batches: bool,
+    timeout: int,
+    jobs: int,
+    max_component_size: int,
+    max_batch_candidates: int,
+    batch_validation_mode: str,
+    max_permutation_factorial: int,
+    max_validation_sequences: int,
+    max_validation_dag_nodes: int,
+    max_validation_dag_edges: int,
+    dump_validation_dag: bool,
+    validation_dag_selected_only: bool,
+    run_validation: bool = True,
+    _constructed_state_dirs: set[Path] | None = None,
+) -> dict:
+    if batch_construction_mode != "pairwise":
+        raise ValueError("batch construction only supports pairwise")
+    state_dir = Path(state_dir)
+    state_key = state_dir.resolve()
+    constructed = _constructed_state_dirs if _constructed_state_dirs is not None else set()
+    if state_key in constructed and all(
+        (state_dir / name).exists()
+        for name in ("batch_summary.csv", "batch_correctness.csv", "coverage_summary.csv")
+    ):
+        summary = _first_row(state_dir / "batch_summary.csv")
+        return {
+            "batch_candidates": len(_read_csv(state_dir / "batch_candidates.csv")),
+            "truncated": str(summary.get("truncated", "")).lower() == "true",
+            "batch_construction_mode": "pairwise",
+        }
+
+    result = build_batch_family(
+        state_dir,
+        max_component_size=max_component_size,
+        max_batch_candidates=max_batch_candidates,
+    )
+    if validate_batches and run_validation:
+        result.update(
+            _validate_batch_candidates_with_ladder(
+                state_dir,
+                tools,
+                timeout=timeout,
+                jobs=jobs,
+                batch_validation_mode=batch_validation_mode,
+                max_permutation_factorial=max_permutation_factorial,
+                max_validation_sequences=max_validation_sequences,
+                max_validation_dag_nodes=max_validation_dag_nodes,
+                max_validation_dag_edges=max_validation_dag_edges,
+                dump_validation_dag=dump_validation_dag,
+                validation_dag_selected_only=validation_dag_selected_only,
+            )
+        )
+    if run_validation:
+        constructed.add(state_key)
+    result["batch_construction_mode"] = "pairwise"
+    return result
+
+
+def _validate_batch_candidates_with_ladder(
+    state_dir: Path,
+    tools: dict,
+    *,
+    timeout: int,
+    jobs: int,
+    batch_validation_mode: str,
+    max_permutation_factorial: int,
+    max_validation_sequences: int,
+    max_validation_dag_nodes: int,
+    max_validation_dag_edges: int,
+    dump_validation_dag: bool,
+    validation_dag_selected_only: bool,
+) -> dict:
+    kwargs = {"timeout": timeout, "jobs": jobs}
+    if batch_validation_mode != "auto":
+        kwargs["batch_validation_mode"] = batch_validation_mode
+    if max_permutation_factorial != 120:
+        kwargs["max_permutation_factorial"] = max_permutation_factorial
+    if max_validation_sequences != 200:
+        kwargs["max_validation_sequences"] = max_validation_sequences
+    if max_validation_dag_nodes != 5000:
+        kwargs["max_validation_dag_nodes"] = max_validation_dag_nodes
+    if max_validation_dag_edges != 20000:
+        kwargs["max_validation_dag_edges"] = max_validation_dag_edges
+    if dump_validation_dag:
+        kwargs["dump_validation_dag"] = dump_validation_dag
+    if validation_dag_selected_only:
+        kwargs["validation_dag_selected_only"] = validation_dag_selected_only
+    return validate_batch_candidates(state_dir, tools, **kwargs)
+
+
 def _format_validation_counts(counts: Counter) -> str:
     ordered = [(status, counts.get(status, 0)) for status in _BATCH_VALIDATION_STATUSES]
     extras = sorted((status, count) for status, count in counts.items() if status not in _BATCH_VALIDATION_STATUSES)
@@ -789,6 +969,7 @@ def _write_batch_explore_summary(
     selected_batch_candidates: int,
     validate_batches: bool,
     allow_sampled_batches: bool,
+    allow_bounded_validation: bool,
     aggregate_batch_rows: list[dict],
     correctness_rows: list[dict],
     aggregate_coverage_rows: list[dict],
@@ -812,6 +993,7 @@ def _write_batch_explore_summary(
         f"- skipped batches: {len(skipped_batches)}",
         f"- validate batches: {_bool(validate_batches)}",
         f"- allow sampled batches: {_bool(allow_sampled_batches)}",
+        f"- allow bounded validation: {_bool(allow_bounded_validation)}",
         "",
         "## Executed Validation Status",
         "",
@@ -819,6 +1001,9 @@ def _write_batch_explore_summary(
     lines.extend(_markdown_table(["validation_status", "count"], [[key, str(count)] for key, count in sorted(validation_counts.items())]))
     lines.extend(["", "## Skipped By Validation Status", ""])
     lines.extend(_markdown_table(["validation_status", "count"], [[key, str(count)] for key, count in sorted(skipped_counts.items())]))
+    lines.extend([""])
+    lines.extend(equality_tier_markdown(_equality_summary_for_states(states)))
+    lines.extend([""])
     lines.extend(["", "## Batch Correctness", ""])
     lines.extend(_batch_correctness_summary(correctness_rows, len(skipped_batches)))
     lines.extend(["", "## Coverage Invariant", ""])
@@ -881,6 +1066,24 @@ def _batch_correctness_rows_from_states(state_rows: list[dict]) -> list[dict]:
         seen_dirs.add(state_dir_key)
         rows.extend(_read_csv(state_dir / "batch_correctness.csv"))
     return rows
+
+
+def _equality_summary_for_states(state_rows: list[dict]) -> list[dict]:
+    rows = []
+    seen_dirs: set[str] = set()
+    for state in state_rows:
+        if str(state.get("is_duplicate", "")).lower() == "true":
+            continue
+        state_dir_value = state.get("state_dir", "")
+        if not state_dir_value:
+            continue
+        state_dir = Path(state_dir_value)
+        state_dir_key = str(state_dir.resolve())
+        if state_dir_key in seen_dirs:
+            continue
+        seen_dirs.add(state_dir_key)
+        rows.extend(_read_csv(state_dir / "pair_relation.csv"))
+    return equality_tier_summary_from_rows(rows)
 
 
 def _batch_correctness_summary(correctness_rows: list[dict], skipped_count: int) -> list[str]:
