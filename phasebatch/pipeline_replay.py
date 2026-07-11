@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import shutil
+import tempfile
 import time
 from pathlib import Path
 
@@ -35,17 +36,25 @@ def replay_optimized_pipeline(run_dir: Path, timeout: int = 10) -> dict:
         _write_csv(run_dir / "pipeline_replay.csv", PIPELINE_REPLAY_FIELDS, [row])
         return {**row, "pipeline_replay_csv": str(run_dir / "pipeline_replay.csv")}
 
-    passes = _split_pipeline(optimized_pipeline)
+    segments = _replay_segments(run_dir, optimized_pipeline)
+    result = None
     try:
         opt = _opt_path(run_dir)
-        result = run_opt(opt, root_ir, passes, replay_output, timeout)
+        with tempfile.TemporaryDirectory(prefix=".phasebatch-replay-", dir=run_dir) as tmp:
+            current_input = root_ir
+            for index, passes in enumerate(segments):
+                output_ir = replay_output if index == len(segments) - 1 else Path(tmp) / f"step_{index:04d}.ll"
+                result = run_opt(opt, current_input, passes, output_ir, timeout)
+                if not result.success or not output_ir.exists():
+                    break
+                current_input = output_ir
     except Exception as exc:  # pragma: no cover - defensive for real tool failures.
         row = _row(run_dir, root_ir, optimized_pipeline, replay_output, final_ir, "", "", False, "failed", str(exc), start)
         _write_csv(run_dir / "pipeline_replay.csv", PIPELINE_REPLAY_FIELDS, [row])
         return {**row, "pipeline_replay_csv": str(run_dir / "pipeline_replay.csv")}
 
-    if not result.success or not replay_output.exists():
-        error_message = (result.stderr or result.failure_kind or "opt failed").strip()
+    if result is None or not result.success or not replay_output.exists():
+        error_message = "opt failed" if result is None else (result.stderr or result.failure_kind or "opt failed").strip()
         final_hash = canonical_hash(final_ir)
         row = _row(run_dir, root_ir, optimized_pipeline, replay_output, final_ir, "", final_hash, False, "failed", error_message, start)
         _write_csv(run_dir / "pipeline_replay.csv", PIPELINE_REPLAY_FIELDS, [row])
@@ -171,6 +180,27 @@ def _split_pipeline(value: str) -> list[str]:
     if tail:
         parts.append(tail)
     return parts
+
+
+def _replay_segments(run_dir: Path, optimized_pipeline: str) -> list[list[str]]:
+    aggregate = _split_pipeline(optimized_pipeline)
+    chosen_path = Path(run_dir) / "chosen_path.csv"
+    if not chosen_path.exists():
+        return [aggregate]
+
+    with chosen_path.open(encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    segments = [
+        _split_batch_order(row.get("canonical_order") or row.get("batch_passes", ""))
+        for row in rows
+    ]
+    segments = [segment for segment in segments if segment]
+    flattened = [pass_name for segment in segments for pass_name in segment]
+    return segments if flattened == aggregate else [aggregate]
+
+
+def _split_batch_order(value: str) -> list[str]:
+    return [part.strip() for part in str(value or "").split(";") if part.strip()]
 
 
 def _opt_path(run_dir: Path) -> str:

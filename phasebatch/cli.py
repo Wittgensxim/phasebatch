@@ -104,9 +104,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     optimize_batches_parser.add_argument(
         "--mode",
-        choices=["exact", "budgeted", "auto"],
-        default="budgeted",
-        help="Optimizer mode. exact expands certified batch DAGs; auto chooses exact or budgeted conservatively.",
+        choices=["rolling-exact", "exact", "budgeted", "auto"],
+        default="rolling-exact",
+        help="Optimizer mode. rolling-exact fully expands each local window and repeats to closure.",
     )
     optimize_batches_parser.add_argument(
         "--objective",
@@ -115,6 +115,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Objective used only for final path selection.",
     )
     optimize_batches_parser.add_argument("--max-rounds", type=int, default=5, help="Maximum optimizer rounds.")
+    optimize_batches_parser.add_argument(
+        "--rolling-window-depth",
+        type=int,
+        default=2,
+        help="Complete lookahead depth for each rolling-exact window.",
+    )
+    optimize_batches_parser.add_argument(
+        "--rolling-frontier-width",
+        type=int,
+        default=5,
+        help="Canonical states retained only at each rolling-exact window boundary.",
+    )
+    optimize_batches_parser.add_argument(
+        "--max-rolling-windows",
+        type=int,
+        default=0,
+        help="Rolling-exact window cap. 0 continues until closure; a reached positive cap is incomplete.",
+    )
     optimize_batches_parser.add_argument("--beam-width", type=int, default=8, help="Maximum frontier states to keep between budgeted rounds.")
     optimize_batches_parser.add_argument("--max-batches-per-state", type=int, default=20, help="Maximum executable batches to apply per state.")
     optimize_batches_parser.add_argument(
@@ -123,7 +141,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="all",
         help="Budgeted validation scope. on-demand stops after enough executable batches are certified.",
     )
-    optimize_batches_parser.add_argument("--max-component-size", type=int, default=10, help="Maximum conflict component size to enumerate exactly when building batch candidates.")
+    optimize_batches_parser.add_argument("--max-component-size", type=int, default=14, help="Maximum conflict component size to enumerate exactly; the default covers Core-v1's full 14-pass set.")
     optimize_batches_parser.add_argument("--max-batch-candidates", type=int, default=200, help="Maximum batch candidates to materialize per state.")
     optimize_batches_parser.add_argument(
         "--pair-testing-mode",
@@ -180,7 +198,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=True,
         help="Stop exact expansion when completeness assumptions are violated.",
     )
-    optimize_batches_parser.add_argument("--validate-batches", action="store_true", help="Validate batch candidates before executing them.")
+    optimize_batches_parser.add_argument(
+        "--validate-batches",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Validate batch candidates before execution. Enabled by default on the maintained mainline.",
+    )
     optimize_batches_parser.add_argument(
         "--allow-sampled-batches",
         action="store_true",
@@ -410,16 +433,19 @@ def build_parser() -> argparse.ArgumentParser:
     advisor_report.add_argument("--out", required=True, help="Advisor study output directory.")
     advisor_report.add_argument("--passes", required=True, help="Stable Phasebatch pass config.")
     advisor_report.add_argument("--benchmark-manifest", default=None, help="Optional explicit benchmark YAML manifest.")
-    advisor_report.add_argument("--num-programs", type=int, default=15, help="Number of automatically selected programs.")
+    advisor_report.add_argument("--num-programs", type=int, default=50, help="Number of automatically selected programs.")
     advisor_report.add_argument("--max-source-bytes", type=int, default=200000, help="Maximum source size for automatic selection.")
     advisor_report.add_argument("--selection-seed", type=int, default=0, help="Deterministic benchmark selection seed.")
     advisor_report.add_argument("--resume", action="store_true", help="Reuse successful per-program optimize outputs.")
     advisor_report.add_argument("--overwrite", action="store_true", help="Replace the explicitly selected study directory.")
     advisor_report.add_argument("--continue-on-error", action="store_true", help="Record program failures and continue; worker infrastructure failures still abort.")
-    advisor_report.add_argument("--mode", choices=["budgeted", "exact", "auto"], default="budgeted", help="Optimizer search mode.")
+    advisor_report.add_argument("--mode", choices=["rolling-exact", "budgeted", "exact", "auto"], default="rolling-exact", help="Optimizer search mode.")
     advisor_report.add_argument("--max-rounds", type=int, default=2, help="Maximum optimizer rounds.")
+    advisor_report.add_argument("--rolling-window-depth", type=int, default=2, help="Complete lookahead depth per rolling-exact window.")
+    advisor_report.add_argument("--rolling-frontier-width", type=int, default=5, help="States retained at each rolling window boundary.")
+    advisor_report.add_argument("--max-rolling-windows", type=int, default=0, help="Rolling window cap; 0 continues until closure.")
     advisor_report.add_argument("--beam-width", type=int, default=4, help="Budgeted frontier width.")
-    advisor_report.add_argument("--max-states", type=int, default=150, help="Maximum reached states per program.")
+    advisor_report.add_argument("--max-states", type=int, default=2000, help="Maximum reached states per program; reaching it makes exact scope incomplete.")
     advisor_report.add_argument("--max-batches-per-state", type=int, default=10, help="Maximum executable batches per state.")
     advisor_report.add_argument("--budgeted-validation-strategy", choices=["all"], default="all", help="Advisor v1 requires validation of all candidates.")
     advisor_report.add_argument("--pair-testing-mode", choices=["full"], default="full", help="Advisor v1 requires full pair testing.")
@@ -428,7 +454,7 @@ def build_parser() -> argparse.ArgumentParser:
     advisor_report.add_argument("--validate-batches", action="store_true", default=True, help="Validate every candidate before execution; always enabled in Advisor v1.")
     advisor_report.add_argument("--jobs", type=int, default=8, help="Parallel job and default worker count.")
     advisor_report.add_argument("--timeout", type=int, default=15, help="Per-operation timeout in seconds.")
-    advisor_report.add_argument("--max-pairs", type=int, default=300, help="Maximum active pass pairs per state.")
+    advisor_report.add_argument("--max-pairs", type=int, default=None, help="Maximum active pass pairs per state. Default tests the full matrix.")
     _add_opt_backend_args(advisor_report)
     advisor_report.set_defaults(func=_run_advisor_report_zh)
 
@@ -701,6 +727,9 @@ def _run_optimize_batches(args: argparse.Namespace) -> int:
             mode=args.mode,
             objective=args.objective,
             max_rounds=args.max_rounds,
+            rolling_window_depth=args.rolling_window_depth,
+            rolling_frontier_width=args.rolling_frontier_width,
+            max_rolling_windows=args.max_rolling_windows,
             beam_width=args.beam_width,
             max_batches_per_state=args.max_batches_per_state,
             budgeted_validation_strategy=args.budgeted_validation_strategy,
@@ -892,6 +921,9 @@ def _run_advisor_report_zh(args: argparse.Namespace) -> int:
         continue_on_error=args.continue_on_error,
         mode=args.mode,
         max_rounds=args.max_rounds,
+        rolling_window_depth=args.rolling_window_depth,
+        rolling_frontier_width=args.rolling_frontier_width,
+        max_rolling_windows=args.max_rolling_windows,
         beam_width=args.beam_width,
         max_states=args.max_states,
         max_batches_per_state=args.max_batches_per_state,
@@ -1175,10 +1207,13 @@ def run_optimize_batches(
     mode: str,
     objective: str,
     max_rounds: int,
+    rolling_window_depth: int = 2,
+    rolling_frontier_width: int = 5,
+    max_rolling_windows: int = 0,
     beam_width: int = 8,
     max_batches_per_state: int,
     budgeted_validation_strategy: str = "all",
-    max_component_size: int = 10,
+    max_component_size: int = 14,
     max_batch_candidates: int = 200,
     batchify_terminal_states: bool = True,
     validate_batches: bool,
@@ -1216,6 +1251,9 @@ def run_optimize_batches(
         "mode": mode,
         "objective": objective,
         "max_rounds": max_rounds,
+        "rolling_window_depth": rolling_window_depth,
+        "rolling_frontier_width": rolling_frontier_width,
+        "max_rolling_windows": max_rolling_windows,
         "beam_width": beam_width,
         "max_batches_per_state": max_batches_per_state,
         "budgeted_validation_strategy": budgeted_validation_strategy,

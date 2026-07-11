@@ -32,6 +32,32 @@ class PipelineReplayTests(unittest.TestCase):
         self.assertEqual(rows[0]["optimized_pipeline"], "pass-a,pass-b")
         self.assertEqual(rows[0]["hashes_match"], "true")
 
+    def test_replay_preserves_chosen_batch_boundaries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = _make_run(Path(tmp), pipeline="pass-a,pass-b,pass-c", final_count=1)
+            _write_csv(
+                run_dir / "chosen_path.csv",
+                ["step", "canonical_order"],
+                [
+                    {"step": "0", "canonical_order": "pass-a;pass-b"},
+                    {"step": "1", "canonical_order": "pass-c"},
+                ],
+            )
+            calls: list[tuple[Path, list[str], Path]] = []
+
+            def fake_run_opt(opt, input_ll, passes, output_ll, timeout):
+                del opt, timeout
+                calls.append((Path(input_ll), list(passes), Path(output_ll)))
+                Path(output_ll).write_text(_ir(2 if len(calls) == 1 else 1), encoding="utf-8")
+                return RunResult(["opt"], 0, "", "", 1.0, output_path=Path(output_ll))
+
+            with mock.patch("phasebatch.pipeline_replay.run_opt", side_effect=fake_run_opt):
+                result = replay_optimized_pipeline(run_dir, timeout=5)
+
+        self.assertEqual(result["replay_status"], "success")
+        self.assertEqual([passes for _input, passes, _output in calls], [["pass-a", "pass-b"], ["pass-c"]])
+        self.assertEqual(calls[1][0], calls[0][2])
+
     def test_replay_detects_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = _make_run(Path(tmp), pipeline="pass-a", final_count=1)
@@ -215,3 +241,10 @@ def _ir(count: int) -> str:
 def _read_csv(path: Path) -> list[dict[str, str]]:
     with path.open(encoding="utf-8", newline="") as handle:
         return list(csv.DictReader(handle))
+
+
+def _write_csv(path: Path, fields: list[str], rows: list[dict[str, str]]) -> None:
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)

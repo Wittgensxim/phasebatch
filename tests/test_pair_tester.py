@@ -126,6 +126,74 @@ class PairTesterTests(unittest.TestCase):
         self.assertEqual(rows[0]["worker_hash_fast_path"], "false")
         self.assertEqual(fake_materialize.call_count, 2)
 
+    def test_worker_materialization_race_retries_with_direct_materialization(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            input_ll = root / "input.ll"
+            input_ll.write_text("define i32 @f() { ret i32 0 }\n", encoding="utf-8")
+            profiles = [
+                {"program": "x", "state_id": "S0000", "state_hash": "s", "pass": name, "active": "true"}
+                for name in ("a", "b")
+            ]
+            call_index = 0
+
+            def run_opt(_opt, _src, _passes, output, _timeout, *, materialize=True):
+                nonlocal call_index
+                call_index += 1
+                result = RunResult(
+                    ["worker"],
+                    0,
+                    "",
+                    "",
+                    1.0,
+                    backend="worker",
+                    worker_id=call_index % 2,
+                    worker_generation=1,
+                    module_handle=f"h{call_index}",
+                    canonical_hash=f"hash-{call_index % 2}",
+                    feature_counts={"instructions": 3},
+                    materialized=materialize,
+                )
+                if materialize:
+                    Path(output).write_text("define i32 @f() { ret i32 0 }\n", encoding="utf-8")
+                return result
+
+            structural = EqualityResult(
+                equal=False,
+                tier="different",
+                can_hard_fold=False,
+                reason="llvm_diff_reported_difference",
+                text_hash_equal=False,
+                llvm_diff_equal=False,
+                module_fingerprint_equal=True,
+                left_hash="safe-a",
+                right_hash="safe-b",
+            )
+
+            with mock.patch("phasebatch.pair_tester.worker_handles_enabled", return_value=True), \
+                mock.patch("phasebatch.pair_tester.run_opt", side_effect=run_opt) as fake_run, \
+                mock.patch("phasebatch.pair_tester.materialize_run_result", side_effect=RuntimeError("unknown handle")), \
+                mock.patch("phasebatch.pair_tester.release_run_result"), \
+                mock.patch("phasebatch.pair_tester.compare_ir_equivalence", return_value=structural):
+                rows = run_pair_tests(
+                    input_ll,
+                    profiles,
+                    {"opt": "opt", "llvm-diff": "llvm-diff"},
+                    root / "pairs",
+                    jobs=1,
+                    timeout=1,
+                    max_pairs=None,
+                )
+
+        self.assertEqual(fake_run.call_count, 4)
+        self.assertTrue(all(call.kwargs["materialize"] is False for call in fake_run.call_args_list[:2]))
+        self.assertTrue(all(call.kwargs["materialize"] is True for call in fake_run.call_args_list[2:]))
+        self.assertEqual(rows[0]["dynamic_relation"], "dynamic_order_sensitive")
+        self.assertEqual(rows[0]["failure_kind"], "")
+        self.assertEqual(rows[0]["materialization_retry"], "true")
+        self.assertEqual(rows[0]["pair_test_retry_opt_runs"], "2")
+        self.assertEqual(rows[0]["pair_test_opt_runs"], "4")
+
     def test_lazy_pair_testing_budget_marks_remaining_pairs_unknown(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

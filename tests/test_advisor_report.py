@@ -20,6 +20,31 @@ class AdvisorReportTests(unittest.TestCase):
         optimizer.assert_not_called()
         self.assertEqual(result["metrics"]["programs"], 0)
 
+    def test_summarize_recovers_rolling_scope_from_program_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            study = Path(tmp)
+            run_dir = study / "programs" / "demo" / "optimize"
+            run_dir.mkdir(parents=True)
+            (run_dir / "metadata.json").write_text(
+                '{"mode":"rolling-exact","rolling_window_depth":2,'
+                '"max_rolling_windows":0,"rolling_windows_completed":3,'
+                '"rolling_committed_depth":6,"rolling_closure_reason":"no_active_passes"}',
+                encoding="utf-8",
+            )
+            with mock.patch("phasebatch.advisor_report.summarize_advisor_metrics", return_value={"programs": 1}), \
+                mock.patch("phasebatch.advisor_report.generate_advisor_figures", return_value={"figures": 9}), \
+                mock.patch("phasebatch.advisor_report.generate_advisor_dags", return_value={"programs": 1}), \
+                mock.patch("phasebatch.advisor_report.generate_advisor_markdown", return_value={"advisor_report_zh": "report.md"}) as markdown:
+                summarize_advisor_report_zh(study)
+
+            metadata = markdown.call_args.kwargs["metadata"]
+
+        self.assertEqual(metadata["rolling_window_depth"], 2)
+        self.assertEqual(metadata["max_rolling_windows"], 0)
+        self.assertEqual(metadata["rolling_windows_completed"], 3)
+        self.assertEqual(metadata["rolling_committed_depth"], 6)
+        self.assertEqual(metadata["rolling_closure_reason"], "no_active_passes")
+
     def test_run_enforces_stable_mainline_and_resume_skips_success(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -80,6 +105,11 @@ class AdvisorReportTests(unittest.TestCase):
         self.assertEqual(kwargs["batch_validation_mode"], "auto")
         self.assertTrue(kwargs["validate_batches"])
         self.assertEqual(kwargs["budgeted_validation_strategy"], "all")
+        self.assertEqual(kwargs["mode"], "rolling-exact")
+        self.assertEqual(kwargs["rolling_window_depth"], 2)
+        self.assertEqual(kwargs["rolling_frontier_width"], 5)
+        self.assertEqual(kwargs["max_rolling_windows"], 0)
+        self.assertIsNone(kwargs["max_pairs"])
         self.assertFalse(kwargs["allow_sampled_batches"])
         self.assertEqual(run_rows[0]["status"], "success")
         self.assertEqual(first["successes"], 1)

@@ -137,8 +137,9 @@ def _candidate_rows(entries: list[dict], root: Path) -> list[dict]:
         source = Path(entry["path"]).resolve()
         relative = entry.get("relative_path") or _relative_path(source, root)
         base_name = _safe_name(str(entry.get("name") or source.stem))
-        names[base_name] += 1
-        program = base_name if names[base_name] == 1 else f"{base_name}_{names[base_name]}"
+        name_key = base_name.casefold()
+        names[name_key] += 1
+        program = base_name if names[name_key] == 1 else f"{base_name}_{names[name_key]}"
         parent = Path(relative).parent.as_posix()
         rows.append(
             {

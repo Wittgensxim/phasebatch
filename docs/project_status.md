@@ -47,9 +47,42 @@ Advisor reporting:
 - `run-advisor-report-zh`
 - `summarize-advisor-report-zh`
 
-The maintained construction path is full pairwise plus reuse/cache. Exact and
-budgeted search, exhaustive/bounded/sampled/DAG validation, lazy pair testing,
-and staged runtime reranking remain available where documented.
+The maintained end-to-end path is full pairwise plus reuse/cache, certified
+batch validation, rolling exact search, and the strict in-process worker.
+Legacy fixed-depth exact, budgeted search, bounded/sampled validation, lazy pair
+testing, and staged runtime reranking remain explicit comparison modes.
+
+## Maintained Search Mainline
+
+`rolling-exact` is the default optimizer mode. It fully expands every exact
+executable batch for two local layers, then retains up to five deterministic,
+diverse open terminals and repeats from all retained states until closure.
+
+- No beam or per-state executable-batch cap is used inside a rolling window.
+- Boundary selection uses objective, direct-call, memory, branch, and novelty
+  buckets; closed states do not consume continuation slots.
+- A temporarily non-improving path may survive long enough to expose a useful
+  later step.
+- Normal closure is `no_active_passes`, `no_executable_batches`, or
+  `state_graph_closed`.
+- Pair omissions, candidate truncation, unresolved components, validation DAG
+  limits, apply failures, state caps, or a positive window cap produce
+  `rolling_exact_incomplete`.
+- `exact_status` reports evidence/window completeness. `global_search_complete`
+  is false whenever more than five open boundary states force pruning.
+- The scope is `rolling_global_exact_to_closure` when no boundary was pruned,
+  otherwise `rolling_window_exact_frontier_limited`; neither claims optimality
+  over arbitrary LLVM pass sequences.
+
+Fixed-depth `exact-rN` remains available with `--mode exact`. `budgeted` retains
+its candidate and beam pruning for performance/scalability comparisons.
+
+The matched five-program H=2/K=5 versus H=3/K=5 pilot completed on 2026-07-11.
+H=3 fully preserved one additional local layer, but total wall-clock increased
+from 91.265 s to 180.526 s (1.978x). All five final IR objectives and static
+feature vectors matched; four of five pipelines were identical. H=2 is therefore
+the maintained default and H=3 is retained as the explicit depth ablation. Evidence:
+`outputs/rolling_depth_comparison_5programs_fixed_20260711/depth_comparison_summary.md`.
 
 ## Correctness Boundary
 
@@ -82,6 +115,7 @@ Optimizer root outputs:
 - `optimize_summary.md`
 - `final_summary.md`
 - `exact_status.txt`
+- `rolling_windows.csv`
 
 Per-state evidence:
 
@@ -112,6 +146,11 @@ LLVM. It provides isolated LLVM contexts, in-memory pass pipelines,
 reference-counted module handles, bounded path caches, deferred materialization,
 and in-process `LLVMDiff` comparison.
 
+If a borrowed pair-result handle is invalidated by a concurrent worker restart,
+the pair tester reruns the same AB/BA pipelines once with direct materialization.
+This keeps pair classification deterministic across worker counts without an
+external-opt fallback; retry counts are explicit in `pair_relation.csv`.
+
 `--opt-backend external` remains available only for intentional comparison.
 Pass-side `LLVM ERROR:` exits become conservative `llvm_fatal` pipeline
 failures and restart the affected worker. Timeout, protocol, and infrastructure
@@ -129,6 +168,12 @@ The matched Salsa20 Core-v1 exact run measured:
 Both runs selected the same state and pipeline, matched all pair and batch
 classifications, and passed replay.
 
+On the local 8-core/16-thread Ryzen 7 9800X3D, matched `crc8.be H=3,K=5`
+runs took 46.795 s with 8 workers, 48.758 s with 12, and 48.762 s with 16.
+All reached the same 66 states and 78 transitions. The maintained local default
+therefore remains 8 workers. Evidence:
+`outputs/worker_scaling_crc8_h3k5_fixed_20260711/worker_scaling_summary.md`.
+
 ## Staged Runtime Result
 
 The retained Salsa20 E5 study uses required IPO, scalar v2, loop/cleanup v4,
@@ -142,12 +187,17 @@ Evidence:
 
 ## Advisor Report
 
-The accepted Advisor Data Report v1 study contains 20 deterministic
-SingleSource C programs under strict worker mode. It fixes pairwise construction,
-full pair testing, auto batch validation, and the existing correctness
-classifier. It emits aggregate CSVs, nine PNG/SVG figure families,
-representative DAG DOT files, one Chinese report per program, and the complete
-Chinese advisor report.
+The retained Advisor Data Report v1 study contains 20 deterministic
+SingleSource C programs under strict worker mode. It is pilot evidence produced
+with budgeted depth 2 and beam width 4. It remains useful for structure, cost,
+and visualization, but is not exact-to-closure evidence.
+
+The formal report command now defaults to 50 programs, `rolling-exact`, a
+complete two-layer window, a five-state boundary frontier, unlimited windows
+until closure, full pair testing without a default pair cap, and a 2000-state
+safety guard. Reaching a safety guard is incomplete; boundary pruning is
+reported separately as `global_search_complete=false`. Formal data must be
+written to a new study directory rather than relabeling the 20-program pilot.
 
 Evidence:
 `outputs/advisor_report_zh_20programs/advisor_report_zh.md`.

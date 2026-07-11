@@ -34,7 +34,16 @@ class AdvisorMarkdownTests(unittest.TestCase):
             _write_csv(study / "unknown_failure_summary.csv", ["program", "pair_unknown", "lazy_budget_skipped"], [{"program": "demo", "pair_unknown": "1", "lazy_budget_skipped": "0"}])
             _write_csv(study / "figures_manifest.csv", ["figure_id", "title_zh", "png_path", "svg_path", "source_csv", "status", "warning"], [])
 
-            result = generate_advisor_markdown(study, metadata={"mode": "budgeted", "benchmark_count": 1})
+            result = generate_advisor_markdown(
+                study,
+                metadata={
+                    "mode": "rolling-exact",
+                    "benchmark_count": 1,
+                    "rolling_window_depth": 2,
+                    "rolling_frontier_width": 5,
+                    "max_rolling_windows": 0,
+                },
+            )
             report = (study / "advisor_report_zh.md").read_text(encoding="utf-8")
             talking = (study / "advisor_talking_points_zh.md").read_text(encoding="utf-8")
             dictionary = (study / "data_dictionary_zh.md").read_text(encoding="utf-8")
@@ -48,7 +57,11 @@ class AdvisorMarkdownTests(unittest.TestCase):
         self.assertIn("30 秒：问题", talking)
         self.assertIn("下一步", talking)
         self.assertIn("true relation flip", dictionary)
-        self.assertEqual(metadata["mode"], "budgeted")
+        self.assertIn("rolling_window_depth: 2", report)
+        self.assertIn("rolling_frontier_width: 5", report)
+        self.assertIn("max_rolling_windows: 0 (until closure)", report)
+        self.assertNotIn("beam_width", report)
+        self.assertEqual(metadata["mode"], "rolling-exact")
         self.assertTrue(Path(result["advisor_key_numbers_csv"]).name == "advisor_key_numbers.csv")
 
 

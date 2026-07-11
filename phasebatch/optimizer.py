@@ -205,6 +205,30 @@ OPTIMIZER_TIMING_FIELDS = [
     "batch_apply_opt_invocations",
 ]
 
+ROLLING_WINDOW_FIELDS = [
+    "window",
+    "root_state_id",
+    "root_state_ids",
+    "root_count",
+    "root_objective",
+    "window_depth",
+    "expanded_states",
+    "terminal_states",
+    "open_terminal_states",
+    "closed_terminal_states",
+    "new_states",
+    "transitions",
+    "selected_terminal_state_id",
+    "selected_frontier_state_ids",
+    "selected_frontier_count",
+    "selected_terminal_objective",
+    "committed_path_steps",
+    "pruned_frontier_states",
+    "selection_buckets",
+    "status",
+    "closure_reason",
+]
+
 
 def optimize_batches(
     input_path: Path,
@@ -214,10 +238,13 @@ def optimize_batches(
     mode: str,
     objective: str,
     max_rounds: int,
+    rolling_window_depth: int = 2,
+    rolling_frontier_width: int = 5,
+    max_rolling_windows: int = 0,
     beam_width: int = 8,
     max_batches_per_state: int,
     budgeted_validation_strategy: str = "all",
-    max_component_size: int = 10,
+    max_component_size: int = 14,
     max_batch_candidates: int = 200,
     batchify_terminal_states: bool = True,
     validate_batches: bool,
@@ -252,8 +279,14 @@ def optimize_batches(
     optimizer_start = time.perf_counter()
     if objective != "ir-inst-count":
         raise ValueError(f"unsupported objective: {objective}")
-    if mode not in {"budgeted", "exact", "auto"}:
+    if mode not in {"budgeted", "exact", "rolling-exact", "auto"}:
         raise NotImplementedError(f"optimize-batches mode '{mode}' is not implemented yet")
+    if rolling_window_depth < 1:
+        raise ValueError("rolling_window_depth must be at least 1")
+    if rolling_frontier_width < 1:
+        raise ValueError("rolling_frontier_width must be at least 1")
+    if max_rolling_windows < 0:
+        raise ValueError("max_rolling_windows must be non-negative")
     batch_selection_policy, frontier_selection_policy = _resolve_budgeted_policies(
         batch_frontier_policy,
         batch_selection_policy,
@@ -262,14 +295,18 @@ def optimize_batches(
     for name, policy in (("batch selection", batch_selection_policy), ("frontier selection", frontier_selection_policy)):
         if policy not in {"score", "largest-batch", "certified-first", "objective", "diverse"}:
             raise ValueError(f"unknown {name} policy: {policy}")
-    if mode == "exact" and allow_sampled_batches:
-        raise ValueError("Exact mode does not allow sampled batches.")
-    if mode == "exact" and allow_bounded_validation:
-        raise ValueError("Exact mode does not allow bounded validation execution.")
+    exact_modes = {"exact", "rolling-exact"}
+    if mode in exact_modes and allow_sampled_batches:
+        label = "Exact mode" if mode == "exact" else "Rolling exact mode"
+        raise ValueError(f"{label} does not allow sampled batches.")
+    if mode in exact_modes and allow_bounded_validation:
+        label = "Exact mode" if mode == "exact" else "Rolling exact mode"
+        raise ValueError(f"{label} does not allow bounded validation execution.")
     if budgeted_validation_strategy not in {"all", "on-demand"}:
         raise ValueError(f"unknown budgeted validation strategy: {budgeted_validation_strategy}")
-    if mode == "exact" and budgeted_validation_strategy != "all":
-        raise ValueError("Exact mode requires budgeted_validation_strategy=all.")
+    if mode in exact_modes and budgeted_validation_strategy != "all":
+        label = "Exact mode" if mode == "exact" else "Rolling exact mode"
+        raise ValueError(f"{label} requires budgeted_validation_strategy=all.")
     if batch_validation_mode not in {"auto", "exhaustive", "dag", "bounded", "sampled"}:
         raise ValueError(f"unknown batch validation mode: {batch_validation_mode}")
     if pair_testing_mode not in {"full", "lazy"}:
@@ -286,6 +323,9 @@ def optimize_batches(
         mode=mode,
         objective=objective,
         max_rounds=max_rounds,
+        rolling_window_depth=rolling_window_depth,
+        rolling_frontier_width=rolling_frontier_width,
+        max_rolling_windows=max_rolling_windows,
         beam_width=beam_width,
         max_batches_per_state=max_batches_per_state,
         budgeted_validation_strategy=budgeted_validation_strategy,
@@ -342,6 +382,8 @@ def optimize_batches(
         context["auto_reason"] = auto_reason
     if context["mode"] == "budgeted":
         result = _run_budgeted(context)
+    elif context["mode"] == "rolling-exact":
+        result = _run_rolling_exact(context)
     else:
         result = _run_exact(context)
     if run_baselines:
@@ -470,6 +512,9 @@ def _prepare_run(**kwargs) -> dict:
             "mode": kwargs["mode"],
             "objective": kwargs["objective"],
             "max_rounds": kwargs["max_rounds"],
+            "rolling_window_depth": kwargs["rolling_window_depth"],
+            "rolling_frontier_width": kwargs["rolling_frontier_width"],
+            "max_rolling_windows": kwargs["max_rolling_windows"],
             "beam_width": kwargs["beam_width"],
             "max_batches_per_state": kwargs["max_batches_per_state"],
             "budgeted_validation_strategy": kwargs["budgeted_validation_strategy"],
@@ -505,7 +550,7 @@ def _prepare_run(**kwargs) -> dict:
             "pair_matrix_complete": (
                 kwargs["pair_testing_mode"] == "full" and kwargs["max_pairs"] is None
             ),
-            "optimizer_version": "exact-1",
+            "optimizer_version": "rolling-exact-2" if kwargs["mode"] == "rolling-exact" else "exact-1",
         }
     )
     write_metadata(out_dir, metadata)
@@ -867,6 +912,628 @@ def _run_budgeted(context: dict) -> dict:
     )
 
 
+def _run_rolling_exact(context: dict) -> dict:
+    program = context["program"]
+    tools = context["tools"]
+    timeout = context["timeout"]
+    window_depth = context["rolling_window_depth"]
+    frontier_width = context["rolling_frontier_width"]
+    max_windows = context["max_rolling_windows"]
+    max_states = context["max_states"]
+    fail_on_incomplete = context["exact_fail_on_incomplete"]
+
+    state_rows: list[dict] = [context["root_row"]]
+    state_rows_by_id: dict[str, dict] = {"S0000": context["root_row"]}
+    dag_rows: list[dict] = []
+    transition_rows: list[dict] = []
+    parent_by_child: dict[str, dict] = {}
+    objective_by_state: dict[str, int] = {"S0000": count_ir_instructions(context["root_ir"])}
+    path_info_by_state: dict[str, dict] = {"S0000": _root_path_info()}
+    state_input_by_id: dict[str, Path] = {"S0000": context["root_ir"]}
+    hash_to_state_id: dict[str, str] = {context["root_hash"]: "S0000"}
+    leaf_reasons: dict[str, str] = {}
+    exact_reasons: list[str] = []
+    event_rows: list[dict] = []
+    window_rows: list[dict] = []
+    frontier_score_rows: list[dict] = []
+    child_info_by_state: dict[str, dict] = {}
+
+    frontier_root_ids = ["S0000"]
+    fully_expanded_state_ids: set[str] = set()
+    closed_candidate_ids: set[str] = set()
+    ever_pruned_state_ids: set[str] = set()
+    next_state_number = 1
+    windows_completed = 0
+    stop_reason = ""
+    closure_reason = ""
+    stopped_incomplete = False
+    budget_exhausted = False
+    continued_after_incomplete = False
+    window_index = 0
+
+    while True:
+        if max_windows > 0 and windows_completed >= max_windows:
+            _add_unique(exact_reasons, "rolling_window_cap_reached")
+            for state_id in frontier_root_ids:
+                leaf_reasons[state_id] = "max_rolling_windows_reached"
+            stop_reason = "max_rolling_windows_reached"
+            closure_reason = stop_reason
+            stopped_incomplete = True
+            budget_exhausted = True
+            break
+
+        window_root_ids = sorted(set(frontier_root_ids))
+        if not window_root_ids:
+            stop_reason = closure_reason = "state_graph_closed"
+            break
+        transitions_before = len(transition_rows)
+        new_states = 0
+        for root_id in window_root_ids:
+            _event(
+                event_rows,
+                window_index,
+                root_id,
+                "rolling_window_start",
+                f"depth={window_depth} roots={len(window_root_ids)} frontier_width={frontier_width}",
+            )
+
+        local_frontier = list(window_root_ids)
+        local_seen: set[str] = set()
+        terminal_ids: list[str] = []
+        terminal_reasons: dict[str, str] = {}
+        boundary_ids: list[str] = []
+        window_incomplete = False
+
+        for local_depth in range(window_depth):
+            if not local_frontier:
+                break
+            next_frontier: list[str] = []
+            for parent_id in sorted(local_frontier):
+                if parent_id in local_seen:
+                    continue
+                if parent_id in fully_expanded_state_ids:
+                    _add_unique(terminal_ids, parent_id)
+                    terminal_reasons.setdefault(parent_id, "state_graph_closed")
+                    closed_candidate_ids.add(parent_id)
+                    continue
+                local_seen.add(parent_id)
+                parent_row = state_rows_by_id[parent_id]
+                parent_dir = Path(parent_row["state_dir"])
+                parent_input = state_input_by_id[parent_id]
+                _event(
+                    event_rows,
+                    window_index,
+                    parent_id,
+                    "rolling_expand_state",
+                    f"local_depth={local_depth}",
+                )
+
+                batch_info = _build_validate_classify(parent_dir, context, allow_sampled_batches=False)
+                state_reasons = _exact_incomplete_reasons(parent_dir, batch_info)
+                for reason in state_reasons:
+                    _add_unique(exact_reasons, reason)
+                if state_reasons:
+                    leaf_reasons[parent_id] = "exact_incomplete"
+                    _event(event_rows, window_index, parent_id, "rolling_incomplete", ";".join(state_reasons))
+                    if fail_on_incomplete:
+                        window_incomplete = True
+                        break
+                    continued_after_incomplete = True
+
+                active_passes = _int(_first_row(parent_dir / "per_state_summary.csv").get("active_passes"))
+                if active_passes == 0:
+                    fully_expanded_state_ids.add(parent_id)
+                    _add_unique(terminal_ids, parent_id)
+                    terminal_reasons[parent_id] = "no_active_passes"
+                    leaf_reasons[parent_id] = "no_active_passes"
+                    closed_candidate_ids.add(parent_id)
+                    continue
+
+                candidates = _read_csv(parent_dir / "batch_candidates.csv")
+                correctness_by_batch = {
+                    row.get("batch_id", ""): row
+                    for row in _read_csv(parent_dir / "batch_correctness.csv")
+                    if row.get("batch_id")
+                }
+                executable = [
+                    (candidate, correctness_by_batch.get(candidate.get("batch_id", ""), {}))
+                    for candidate in candidates
+                    if _is_exact_executable(correctness_by_batch.get(candidate.get("batch_id", ""), {}))
+                ]
+                if not executable:
+                    fully_expanded_state_ids.add(parent_id)
+                    _add_unique(terminal_ids, parent_id)
+                    terminal_reasons[parent_id] = "no_executable_batches"
+                    leaf_reasons[parent_id] = "no_executable_batches"
+                    closed_candidate_ids.add(parent_id)
+                    continue
+
+                parent_expansion_complete = True
+                for candidate, correctness in executable:
+                    order = _split_order(candidate.get("canonical_order") or candidate.get("batch_passes"))
+                    if not order:
+                        continue
+                    batch_id = candidate.get("batch_id", "")
+                    artifact_id = f"W{window_index:04d}_D{local_depth:02d}_{batch_id}"
+                    child_artifact = _successor_artifact(parent_dir, artifact_id)
+                    result = run_opt(
+                        tools["opt"],
+                        parent_input,
+                        resolve_pipeline_sequence(order, context["pass_registry"]),
+                        child_artifact,
+                        timeout,
+                    )
+                    _record_batch_apply(context, result)
+                    if not result.success or not child_artifact.exists():
+                        reason = f"batch_apply_failed:{parent_id}:{batch_id}"
+                        _add_unique(exact_reasons, reason)
+                        leaf_reasons[parent_id] = "exact_incomplete"
+                        _event(event_rows, window_index, parent_id, "rolling_incomplete", reason)
+                        if fail_on_incomplete:
+                            window_incomplete = True
+                            break
+                        continued_after_incomplete = True
+                        parent_expansion_complete = False
+                        continue
+
+                    child_hash = canonical_hash(child_artifact)
+                    duplicate_of = hash_to_state_id.get(child_hash, "")
+                    is_duplicate = bool(duplicate_of)
+                    canonical_order = ";".join(order)
+
+                    if is_duplicate:
+                        child_id = duplicate_of
+                        child_row = state_rows_by_id[child_id]
+                    else:
+                        if _unique_state_count(state_rows) >= max_states:
+                            _add_unique(exact_reasons, "state_cap_exceeded")
+                            leaf_reasons[parent_id] = "state_cap_reached"
+                            _event(event_rows, window_index, parent_id, "rolling_incomplete", "state_cap_exceeded")
+                            window_incomplete = True
+                            budget_exhausted = True
+                            break
+                        child_id = f"S{next_state_number:04d}"
+                        next_state_number += 1
+                        child_dir = context["states_dir"] / child_id
+                        child_input = _materialize_state_input(child_dir, child_artifact)
+                        child_depth = path_info_by_state[parent_id]["path_length"] + 1
+                        _analyze_new_state(
+                            context,
+                            child_input,
+                            child_dir,
+                            child_id,
+                            child_depth,
+                            parent_id,
+                            canonical_order,
+                        )
+                        child_row = _state_row_from_summary(
+                            child_dir,
+                            program=program,
+                            state_id=child_id,
+                            state_hash=child_hash,
+                            depth=child_depth,
+                            parent_state_id=parent_id,
+                            transition_pass=canonical_order,
+                            ir_path=child_input,
+                            is_duplicate=False,
+                            duplicate_of="",
+                        )
+                        state_rows.append(child_row)
+                        state_rows_by_id[child_id] = child_row
+                        state_input_by_id[child_id] = child_input
+                        objective_by_state[child_id] = count_ir_instructions(child_input)
+                        hash_to_state_id[child_hash] = child_id
+                        new_states += 1
+
+                    transition = _transition_row(
+                        program,
+                        parent_row,
+                        child_row,
+                        candidate,
+                        correctness,
+                        child_hash,
+                        is_duplicate,
+                        duplicate_of,
+                    )
+                    transition_rows.append(transition)
+                    dag_rows.append(
+                        _dag_row(
+                            program,
+                            parent_row,
+                            child_row,
+                            candidate,
+                            correctness,
+                            child_hash,
+                            is_duplicate,
+                            duplicate_of,
+                        )
+                    )
+                    edge = _edge_for_path(
+                        transition,
+                        canonical_order,
+                        objective_by_state[parent_id],
+                        objective_by_state[child_id],
+                    )
+                    candidate_global_path = _extend_path_info(
+                        path_info_by_state[parent_id], candidate, correctness, order
+                    )
+                    path_updated = child_id != "S0000" and (
+                        child_id not in path_info_by_state
+                        or _path_is_better(candidate_global_path, path_info_by_state[child_id])
+                    )
+                    if path_updated:
+                        path_info_by_state[child_id] = candidate_global_path
+                        parent_by_child[child_id] = edge
+                        child_dir = Path(child_row["state_dir"])
+                        child_info_by_state[child_id] = {
+                            "parent_state_id": parent_id,
+                            "last_batch_id": batch_id,
+                            "last_batch_size": candidate.get("batch_size", ""),
+                            "batch_passes": canonical_order,
+                            "component_choices": candidate.get("component_choices", ""),
+                            "active_pass_signature": _active_pass_signature(child_dir),
+                            "validation_status": correctness.get("validation_status", ""),
+                            "correctness_class": correctness.get("correctness_class", ""),
+                            **_enable_effect_counts(parent_dir, child_dir, context["valid_passes"]),
+                        }
+
+                    if child_id in fully_expanded_state_ids or child_id in local_seen:
+                        _add_unique(terminal_ids, child_id)
+                        terminal_reasons.setdefault(child_id, "state_graph_closed")
+                        closed_candidate_ids.add(child_id)
+                    elif child_id not in next_frontier:
+                        next_frontier.append(child_id)
+
+                if window_incomplete:
+                    break
+                if parent_expansion_complete:
+                    fully_expanded_state_ids.add(parent_id)
+
+            if window_incomplete:
+                break
+            if local_depth == window_depth - 1:
+                for state_id in sorted(next_frontier):
+                    _add_unique(boundary_ids, state_id)
+                    _add_unique(terminal_ids, state_id)
+                    terminal_reasons.setdefault(state_id, "rolling_window_depth_reached")
+                local_frontier = []
+            else:
+                local_frontier = sorted(next_frontier)
+
+        if window_incomplete:
+            window_rows.append(
+                _rolling_window_row(
+                    window_index=window_index,
+                    root_state_ids=window_root_ids,
+                    objective_by_state=objective_by_state,
+                    window_depth=window_depth,
+                    expanded_states=len(local_seen),
+                    terminal_state_ids=terminal_ids,
+                    open_terminal_state_ids=[],
+                    closed_terminal_state_ids=terminal_ids,
+                    new_states=new_states,
+                    transitions=len(transition_rows) - transitions_before,
+                    selected_state_ids=[],
+                    selection_buckets={},
+                    path_info_by_state=path_info_by_state,
+                    status="incomplete",
+                    closure_reason="exact_incomplete",
+                )
+            )
+            stop_reason = "exact_incomplete"
+            closure_reason = stop_reason
+            stopped_incomplete = True
+            break
+
+        open_terminal_ids: list[str] = []
+        closed_terminal_ids = [
+            state_id
+            for state_id in terminal_ids
+            if terminal_reasons.get(state_id) != "rolling_window_depth_reached"
+        ]
+        for state_id in boundary_ids:
+            if _int(state_rows_by_id[state_id].get("active_passes")) == 0:
+                terminal_reasons[state_id] = "no_active_passes"
+                leaf_reasons[state_id] = "no_active_passes"
+                closed_candidate_ids.add(state_id)
+                _add_unique(closed_terminal_ids, state_id)
+            elif state_id in fully_expanded_state_ids:
+                terminal_reasons[state_id] = "state_graph_closed"
+                closed_candidate_ids.add(state_id)
+                _add_unique(closed_terminal_ids, state_id)
+            else:
+                open_terminal_ids.append(state_id)
+
+        ordered_open = sorted(
+            set(open_terminal_ids),
+            key=lambda state_id: _rolling_terminal_key(
+                state_id, objective_by_state, path_info_by_state
+            ),
+        )
+        if not ordered_open:
+            reasons = {terminal_reasons.get(state_id, "") for state_id in terminal_ids}
+            if reasons == {"no_active_passes"}:
+                closure_reason = "no_active_passes"
+            elif reasons == {"no_executable_batches"}:
+                closure_reason = "no_executable_batches"
+            else:
+                closure_reason = "state_graph_closed"
+            stop_reason = closure_reason
+            windows_completed += 1
+            selectable = sorted(
+                closed_candidate_ids or set(window_root_ids),
+                key=lambda state_id: _state_selection_key(
+                    state_id, objective_by_state, path_info_by_state
+                ),
+            )
+            selected_for_row = selectable[:1]
+            window_rows.append(
+                _rolling_window_row(
+                    window_index=window_index,
+                    root_state_ids=window_root_ids,
+                    objective_by_state=objective_by_state,
+                    window_depth=window_depth,
+                    expanded_states=len(local_seen),
+                    terminal_state_ids=terminal_ids,
+                    open_terminal_state_ids=[],
+                    closed_terminal_state_ids=closed_terminal_ids,
+                    new_states=new_states,
+                    transitions=len(transition_rows) - transitions_before,
+                    selected_state_ids=selected_for_row,
+                    selection_buckets={},
+                    path_info_by_state=path_info_by_state,
+                    status="closed",
+                    closure_reason=closure_reason,
+                )
+            )
+            _event(event_rows, window_index, selected_for_row[0], "rolling_closure", closure_reason)
+            break
+
+        selected_state_ids, selection_buckets, checkpoint_score_rows = _select_rolling_frontier(
+            ordered_open,
+            window_index=window_index,
+            frontier_width=frontier_width,
+            state_rows_by_id=state_rows_by_id,
+            objective_by_state=objective_by_state,
+            child_info_by_state=child_info_by_state,
+            context=context,
+        )
+        frontier_score_rows.extend(checkpoint_score_rows)
+        selected_set = set(selected_state_ids)
+        pruned_ids = [state_id for state_id in ordered_open if state_id not in selected_set]
+        ever_pruned_state_ids.update(pruned_ids)
+        for state_id in pruned_ids:
+            leaf_reasons[state_id] = "rolling_frontier_pruned"
+        for state_id in selected_state_ids:
+            leaf_reasons.pop(state_id, None)
+
+        frontier_root_ids = list(selected_state_ids)
+        windows_completed += 1
+        row_status = "committed"
+        row_closure = ""
+        if max_windows > 0 and windows_completed >= max_windows:
+            _add_unique(exact_reasons, "rolling_window_cap_reached")
+            row_status = "incomplete"
+            row_closure = "max_rolling_windows_reached"
+            stop_reason = row_closure
+            closure_reason = row_closure
+            for state_id in frontier_root_ids:
+                leaf_reasons[state_id] = row_closure
+            stopped_incomplete = True
+            budget_exhausted = True
+
+        window_rows.append(
+            _rolling_window_row(
+                window_index=window_index,
+                root_state_ids=window_root_ids,
+                objective_by_state=objective_by_state,
+                window_depth=window_depth,
+                expanded_states=len(local_seen),
+                terminal_state_ids=terminal_ids,
+                open_terminal_state_ids=ordered_open,
+                closed_terminal_state_ids=closed_terminal_ids,
+                new_states=new_states,
+                transitions=len(transition_rows) - transitions_before,
+                selected_state_ids=selected_state_ids,
+                selection_buckets=selection_buckets,
+                path_info_by_state=path_info_by_state,
+                status=row_status,
+                closure_reason=row_closure,
+            )
+        )
+        for state_id in selected_state_ids:
+            _event(
+                event_rows,
+                window_index,
+                state_id,
+                "rolling_frontier_keep",
+                f"bucket={selection_buckets.get(state_id, '')} objective={objective_by_state[state_id]}",
+            )
+        if row_closure:
+            for state_id in selected_state_ids:
+                _event(event_rows, window_index, state_id, "rolling_closure", row_closure)
+            break
+        window_index += 1
+
+    if stopped_incomplete or exact_reasons:
+        status = "rolling_exact_incomplete_continued" if continued_after_incomplete else "rolling_exact_incomplete"
+    else:
+        status = "rolling_exact_complete"
+
+    global_search_complete = not ever_pruned_state_ids and not stopped_incomplete and not exact_reasons
+    context["exact_scope"] = (
+        "rolling_global_exact_to_closure"
+        if global_search_complete
+        else "rolling_window_exact_frontier_limited"
+    )
+    context["rolling_windows_completed"] = windows_completed
+    context["rolling_closure_reason"] = closure_reason
+    context["rolling_frontier_pruned"] = bool(ever_pruned_state_ids)
+    context["rolling_frontier_states_pruned"] = len(ever_pruned_state_ids)
+    context["global_search_complete"] = global_search_complete
+    final_candidates = set(frontier_root_ids) | closed_candidate_ids
+    if stopped_incomplete:
+        final_candidates.update(path_info_by_state)
+    if not final_candidates:
+        final_candidates.add("S0000")
+    selected_state_id = min(
+        final_candidates,
+        key=lambda state_id: _state_selection_key(
+            state_id, objective_by_state, path_info_by_state
+        ),
+    )
+    context["rolling_committed_depth"] = path_info_by_state[selected_state_id]["path_length"]
+    return _finish_run(
+        context,
+        state_rows=state_rows,
+        dag_rows=dag_rows,
+        transition_rows=transition_rows,
+        parent_by_child=parent_by_child,
+        objective_by_state=objective_by_state,
+        path_info_by_state=path_info_by_state,
+        state_input_by_id=state_input_by_id,
+        leaf_reasons=leaf_reasons,
+        exact_status=status,
+        exact_reasons=exact_reasons,
+        duplicate_transitions=sum(1 for row in dag_rows if row.get("is_duplicate") == "true"),
+        frontier_score_rows=frontier_score_rows,
+        event_rows=event_rows,
+        budget_exhausted=budget_exhausted,
+        stop_reason=stop_reason,
+        selected_state_id=selected_state_id,
+        rolling_window_rows=window_rows,
+    )
+
+
+def _select_rolling_frontier(
+    state_ids: list[str],
+    *,
+    window_index: int,
+    frontier_width: int,
+    state_rows_by_id: dict[str, dict],
+    objective_by_state: dict[str, int],
+    child_info_by_state: dict[str, dict],
+    context: dict,
+) -> tuple[list[str], dict[str, str], list[dict]]:
+    score_rows = _frontier_score_rows(
+        state_ids,
+        round_index=window_index,
+        policy="rolling-checkpoint",
+        state_rows_by_id=state_rows_by_id,
+        objective_by_state=objective_by_state,
+        child_info_by_state=child_info_by_state,
+        context=context,
+    )
+    if len(state_ids) <= frontier_width:
+        selected_with_buckets = [(state_id, "all_within_frontier") for state_id in state_ids]
+    else:
+        selected_with_buckets = _select_diversity_preserving_beam(
+            score_rows, beam_width=frontier_width
+        )
+    selected_ids = [state_id for state_id, _bucket in selected_with_buckets]
+    buckets = dict(selected_with_buckets)
+    rank_by_state = {state_id: str(rank) for rank, state_id in enumerate(selected_ids)}
+    rows_by_state = {row["state_id"]: row for row in score_rows}
+    output_order = selected_ids + [state_id for state_id in state_ids if state_id not in set(selected_ids)]
+    output_rows: list[dict] = []
+    for fallback_rank, state_id in enumerate(output_order):
+        row = rows_by_state[state_id]
+        row["rank"] = rank_by_state.get(state_id, str(len(selected_ids) + fallback_rank))
+        row["selection_bucket"] = buckets.get(state_id, "")
+        row["selected_for_frontier"] = _bool(state_id in set(selected_ids))
+        row["selection_reason"] = (
+            "rolling_checkpoint_selected"
+            if state_id in set(selected_ids)
+            else "rolling_checkpoint_pruned"
+        )
+        output_rows.append(row)
+    return selected_ids, buckets, output_rows
+
+
+def _rolling_terminal_key(
+    state_id: str,
+    objective_by_state: dict[str, int],
+    local_path_info: dict[str, dict],
+) -> tuple[int, int, int, float, str]:
+    path_info = local_path_info[state_id]
+    return (
+        objective_by_state[state_id],
+        path_info["path_length"],
+        path_info["pass_invocations"],
+        -_certified_ratio(path_info),
+        state_id,
+    )
+
+
+def _rolling_route(root_state_id: str, terminal_state_id: str, parent_by_child: dict[str, dict]) -> list[dict]:
+    route: list[dict] = []
+    current = terminal_state_id
+    seen: set[str] = set()
+    while current != root_state_id:
+        if current in seen or current not in parent_by_child:
+            return []
+        seen.add(current)
+        edge = parent_by_child[current]
+        route.append(edge)
+        current = edge.get("parent_state_id", "")
+    route.reverse()
+    return route
+
+
+def _rolling_window_row(
+    *,
+    window_index: int,
+    root_state_ids: list[str],
+    objective_by_state: dict[str, int],
+    window_depth: int,
+    expanded_states: int,
+    terminal_state_ids: list[str],
+    open_terminal_state_ids: list[str],
+    closed_terminal_state_ids: list[str],
+    new_states: int,
+    transitions: int,
+    selected_state_ids: list[str],
+    selection_buckets: dict[str, str],
+    path_info_by_state: dict[str, dict],
+    status: str,
+    closure_reason: str,
+) -> dict:
+    first_root = root_state_ids[0] if root_state_ids else ""
+    first_selected = selected_state_ids[0] if selected_state_ids else ""
+    root_depth = min(
+        (path_info_by_state[state_id]["path_length"] for state_id in root_state_ids),
+        default=0,
+    )
+    selected_depth = (
+        path_info_by_state[first_selected]["path_length"] if first_selected else root_depth
+    )
+    return {
+        "window": str(window_index),
+        "root_state_id": first_root,
+        "root_state_ids": ";".join(root_state_ids),
+        "root_count": str(len(root_state_ids)),
+        "root_objective": str(min((objective_by_state[state_id] for state_id in root_state_ids), default=0)),
+        "window_depth": str(window_depth),
+        "expanded_states": str(expanded_states),
+        "terminal_states": str(len(set(terminal_state_ids))),
+        "open_terminal_states": str(len(set(open_terminal_state_ids))),
+        "closed_terminal_states": str(len(set(closed_terminal_state_ids))),
+        "new_states": str(new_states),
+        "transitions": str(transitions),
+        "selected_terminal_state_id": first_selected,
+        "selected_frontier_state_ids": ";".join(selected_state_ids),
+        "selected_frontier_count": str(len(selected_state_ids)),
+        "selected_terminal_objective": "" if not first_selected else str(objective_by_state[first_selected]),
+        "committed_path_steps": str(max(0, selected_depth - root_depth)),
+        "pruned_frontier_states": str(max(0, len(set(open_terminal_state_ids)) - len(selected_state_ids))),
+        "selection_buckets": ";".join(
+            f"{state_id}:{selection_buckets.get(state_id, '')}" for state_id in selected_state_ids
+        ),
+        "status": status,
+        "closure_reason": closure_reason,
+    }
+
+
 def _run_exact(context: dict) -> dict:
     out_dir: Path = context["out_dir"]
     program = context["program"]
@@ -1033,10 +1700,13 @@ def _finish_run(
     event_rows: list[dict] | None = None,
     budget_exhausted: bool = False,
     stop_reason: str = "max_rounds_reached",
+    selected_state_id: str | None = None,
+    rolling_window_rows: list[dict] | None = None,
 ) -> dict:
     out_dir: Path = context["out_dir"]
     frontier_score_rows = frontier_score_rows or []
     event_rows = event_rows or []
+    rolling_window_rows = rolling_window_rows or []
     if context.get("batchify_terminal_states", True):
         _batchify_terminal_frontier_states(state_rows, leaf_reasons, context)
     context["pair_matrix_complete"] = all(
@@ -1057,11 +1727,21 @@ def _finish_run(
             "pair_matrix_complete": pair_matrix_complete,
             "exact_status": exact_status,
             "exact_incomplete_reasons": exact_reasons,
+            "exact_scope": context.get("exact_scope", "fixed_depth_exact" if context.get("mode") == "exact" else "not_applicable"),
+            "rolling_window_depth": context.get("rolling_window_depth", 2),
+            "rolling_frontier_width": context.get("rolling_frontier_width", 5),
+            "max_rolling_windows": context.get("max_rolling_windows", 0),
+            "rolling_windows_completed": context.get("rolling_windows_completed", 0),
+            "rolling_committed_depth": context.get("rolling_committed_depth", 0),
+            "rolling_closure_reason": context.get("rolling_closure_reason", ""),
+            "rolling_frontier_pruned": context.get("rolling_frontier_pruned", False),
+            "rolling_frontier_states_pruned": context.get("rolling_frontier_states_pruned", 0),
+            "global_search_complete": context.get("global_search_complete", context.get("mode") == "exact"),
         }
     )
     write_metadata(out_dir, metadata)
     state_rows_by_id = {row.get("state_id", ""): row for row in state_rows}
-    selected_state_id = _select_best_state(state_rows, objective_by_state, path_info_by_state)
+    selected_state_id = selected_state_id or _select_best_state(state_rows, objective_by_state, path_info_by_state)
     selected_input = state_input_by_id[selected_state_id]
     shutil.copyfile(selected_input, out_dir / "final.ll")
 
@@ -1106,6 +1786,7 @@ def _finish_run(
     _write_csv(out_dir / "chosen_path_summary.csv", CHOSEN_PATH_SUMMARY_FIELDS, chosen_path_summary_rows)
     _write_csv(out_dir / "frontier_scores.csv", FRONTIER_SCORE_FIELDS, frontier_score_rows)
     _write_csv(out_dir / "optimizer_events.csv", OPTIMIZER_EVENT_FIELDS, event_rows)
+    _write_csv(out_dir / "rolling_windows.csv", ROLLING_WINDOW_FIELDS, rolling_window_rows)
     _write_optimized_batches(out_dir / "optimized_batches.txt", chosen_path_rows)
     (out_dir / "optimized_pipeline.txt").write_text(optimized_pipeline + ("\n" if optimized_pipeline else ""), encoding="utf-8")
     (out_dir / "optimized_pipeline_names.txt").write_text(
@@ -1131,6 +1812,16 @@ def _finish_run(
         auto_reason=context.get("auto_reason", ""),
         objective=context["objective"],
         max_rounds=context["max_rounds"],
+        rolling_window_depth=context.get("rolling_window_depth", 2),
+        rolling_frontier_width=context.get("rolling_frontier_width", 5),
+        max_rolling_windows=context.get("max_rolling_windows", 0),
+        rolling_windows_completed=context.get("rolling_windows_completed", 0),
+        rolling_committed_depth=context.get("rolling_committed_depth", 0),
+        rolling_closure_reason=context.get("rolling_closure_reason", ""),
+        rolling_frontier_pruned=context.get("rolling_frontier_pruned", False),
+        rolling_frontier_states_pruned=context.get("rolling_frontier_states_pruned", 0),
+        global_search_complete=context.get("global_search_complete", context.get("mode") == "exact"),
+        exact_scope=context.get("exact_scope", "fixed_depth_exact" if context.get("mode") == "exact" else "not_applicable"),
         beam_width=context["beam_width"],
         max_states=context["max_states"],
         max_batches_per_state=context["max_batches_per_state"],
@@ -1192,6 +1883,16 @@ def _finish_run(
         "final_objective_value": objective_by_state[selected_state_id],
         "exact_status": exact_status,
         "exact_incomplete_reasons": ";".join(exact_reasons),
+        "exact_scope": context.get("exact_scope", "fixed_depth_exact" if context.get("mode") == "exact" else "not_applicable"),
+        "rolling_window_depth": context.get("rolling_window_depth", 2),
+        "rolling_frontier_width": context.get("rolling_frontier_width", 5),
+        "max_rolling_windows": context.get("max_rolling_windows", 0),
+        "rolling_windows_completed": context.get("rolling_windows_completed", 0),
+        "rolling_committed_depth": context.get("rolling_committed_depth", 0),
+        "rolling_closure_reason": context.get("rolling_closure_reason", ""),
+        "rolling_frontier_pruned": bool(context.get("rolling_frontier_pruned", False)),
+        "rolling_frontier_states_pruned": _int(context.get("rolling_frontier_states_pruned", 0)),
+        "global_search_complete": bool(context.get("global_search_complete", context.get("mode") == "exact")),
         "selected_final_state_truncated": selected_terminal_report["selected_final_state_truncated"],
         "remaining_active_pass_count": selected_terminal_report["remaining_active_pass_count"],
         "remaining_active_passes": selected_terminal_report["remaining_active_passes"],
@@ -1202,6 +1903,7 @@ def _finish_run(
         "final_ll": str(out_dir / "final.ll"),
         "optimized_pipeline": str(out_dir / "optimized_pipeline.txt"),
         "chosen_path_csv": str(out_dir / "chosen_path.csv"),
+        "rolling_windows_csv": str(out_dir / "rolling_windows.csv"),
         "optimize_summary": str(out_dir / "optimize_summary.md"),
     }
 
@@ -1498,7 +2200,11 @@ def _validate_batch_candidates_with_ladder(
 def _batchify_terminal_frontier_states(state_rows: list[dict], leaf_reasons: dict[str, str], context: dict) -> None:
     for state in state_rows:
         state_id = state.get("state_id", "")
-        if leaf_reasons.get(state_id) != "max_rounds_reached":
+        if leaf_reasons.get(state_id) not in {
+            "max_rounds_reached",
+            "max_rolling_windows_reached",
+            "rolling_window_unselected",
+        }:
             continue
         if _is_true(state.get("is_duplicate")):
             continue
@@ -1529,8 +2235,14 @@ def _selected_terminal_report(selected_state_id: str, leaf_rows: list[dict], *, 
     state_dir = Path(state_rows_by_id.get(selected_state_id, {}).get("state_dir", ""))
     active_passes = _remaining_active_passes(state_dir)
     executable_batches = _remaining_executable_batches(state_dir)
-    truncated = leaf_reason in {"max_rounds_reached", "state_cap_reached", "exact_incomplete", "beam_pruned"}
-    if exact_status and exact_status not in {"exact_complete", "not_applicable"}:
+    truncated = leaf_reason in {
+        "max_rounds_reached",
+        "max_rolling_windows_reached",
+        "state_cap_reached",
+        "exact_incomplete",
+        "beam_pruned",
+    }
+    if exact_status and exact_status not in {"exact_complete", "rolling_exact_complete", "not_applicable"}:
         truncated = True
     return {
         "selected_final_state_truncated": _bool(truncated),
@@ -1590,13 +2302,19 @@ def _exact_incomplete_reasons(state_dir: Path, batch_info: dict) -> list[str]:
         for row in validations
     ):
         reasons.append(f"validation_dag_incomplete:{state_id}")
-    non_certified = [
-        row.get("batch_id", "")
-        for row in candidates
-        if row.get("batch_id", "")
-        and not _is_exact_executable(correctness_by_id.get(row.get("batch_id", ""), {}))
-    ]
-    if non_certified:
+    unresolved_validation = []
+    for row in candidates:
+        batch_id = row.get("batch_id", "")
+        correctness_row = correctness_by_id.get(batch_id, {})
+        if not batch_id or _is_exact_executable(correctness_row):
+            continue
+        if (
+            correctness_row.get("correctness_class") == "rejected_batch"
+            and correctness_row.get("validation_status") == "mismatch"
+        ):
+            continue
+        unresolved_validation.append(batch_id)
+    if unresolved_validation:
         reasons.append(f"non_certified_batch_validation:{state_id}")
     return reasons
 
@@ -2712,6 +3430,16 @@ def _write_summary(
     auto_reason: str,
     objective: str,
     max_rounds: int,
+    rolling_window_depth: int,
+    rolling_frontier_width: int,
+    max_rolling_windows: int,
+    rolling_windows_completed: int,
+    rolling_committed_depth: int,
+    rolling_closure_reason: str,
+    rolling_frontier_pruned: bool,
+    rolling_frontier_states_pruned: int,
+    global_search_complete: bool,
+    exact_scope: str,
     beam_width: int,
     max_states: int,
     max_batches_per_state: int,
@@ -2764,7 +3492,17 @@ def _write_summary(
         f"- objective: {objective}",
         f"- exact_status: {exact_status}",
         f"- exact_incomplete_reasons: {';'.join(exact_reasons)}",
+        f"- exact_scope: {exact_scope}",
         f"- max_rounds: {max_rounds}",
+        f"- rolling_window_depth: {rolling_window_depth}",
+        f"- rolling_frontier_width: {rolling_frontier_width}",
+        f"- max_rolling_windows: {max_rolling_windows}",
+        f"- rolling_windows_completed: {rolling_windows_completed}",
+        f"- rolling_committed_depth: {rolling_committed_depth}",
+        f"- rolling_closure_reason: {rolling_closure_reason}",
+        f"- rolling_frontier_pruned: {_bool(rolling_frontier_pruned)}",
+        f"- rolling_frontier_states_pruned: {rolling_frontier_states_pruned}",
+        f"- global_search_complete: {_bool(global_search_complete)}",
         f"- beam_width: {beam_width}",
         f"- max_states: {max_states}",
         f"- max_batches_per_state: {max_batches_per_state}",

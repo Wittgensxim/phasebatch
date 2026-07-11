@@ -128,6 +128,8 @@ def run_pair_tests(
                 ab = run_opt(str(tools["opt"]), input_ll, [pipeline_a, pipeline_b], ab_path, timeout)
                 ba = run_opt(str(tools["opt"]), input_ll, [pipeline_b, pipeline_a], ba_path, timeout)
         opt_time_ms = ab.time_ms + ba.time_ms
+        retry_opt_runs = 0
+        retry_pass_invocations = 0
         row["ab_success"] = _bool(ab.success)
         row["ba_success"] = _bool(ba.success)
         row["time_ms"] = f"{opt_time_ms:.3f}"
@@ -165,6 +167,7 @@ def run_pair_tests(
                     right_hash=ba.canonical_hash,
                 )
             else:
+                materialization_retry_reason = ""
                 try:
                     if not ab.materialized:
                         materialize_run_result(ab, ab_path, timeout=timeout)
@@ -173,23 +176,45 @@ def run_pair_tests(
                         materialize_run_result(ba, ba_path, timeout=timeout)
                         materializations += 1
                 except (OSError, RuntimeError, ValueError) as exc:
-                    equality = EqualityResult(
-                        equal=False,
-                        tier="failed",
-                        can_hard_fold=False,
-                        reason="materialize_failed",
-                        error_message=str(exc),
+                    materialization_retry_reason = str(exc) or "borrowed_handle_unavailable"
+                if not (ab_path.exists() and ba_path.exists()):
+                    materialization_retry_reason = materialization_retry_reason or "materialized_output_missing"
+                if materialization_retry_reason:
+                    if ab.backend == "worker":
+                        release_run_result(ab, timeout=timeout)
+                    if ba.backend == "worker":
+                        release_run_result(ba, timeout=timeout)
+                    ab_path.unlink(missing_ok=True)
+                    ba_path.unlink(missing_ok=True)
+                    ab, ba = _rerun_pair_materialized(
+                        tools=tools,
+                        input_ll=input_ll,
+                        reuse_a=reuse_a,
+                        reuse_b=reuse_b,
+                        pipeline_a=pipeline_a,
+                        pipeline_b=pipeline_b,
+                        ab_path=ab_path,
+                        ba_path=ba_path,
+                        timeout=timeout,
                     )
-                else:
-                    if ab_path.exists() and ba_path.exists():
+                    retry_opt_runs = 2
+                    retry_pass_invocations = 2 if reused_single_pass_outputs else 4
+                    opt_time_ms += ab.time_ms + ba.time_ms
+                    row["materialization_retry"] = "true"
+                    row["materialization_retry_reason"] = materialization_retry_reason
+                    if ab.success and ba.success and ab_path.exists() and ba_path.exists():
+                        materializations += 2
                         equality = compare_ir_equivalence(ab_path, ba_path, tools=tools, timeout=timeout)
                     else:
                         equality = EqualityResult(
                             equal=False,
                             tier="failed",
                             can_hard_fold=False,
-                            reason="materialize_failed",
+                            reason="materialization_retry_failed",
+                            error_message="direct worker materialization retry failed",
                         )
+                else:
+                    equality = compare_ir_equivalence(ab_path, ba_path, tools=tools, timeout=timeout)
             row["comparator_time_ms"] = f"{(time.perf_counter() - compare_start) * 1000:.3f}"
             ab_hash = equality.left_hash or (canonical_hash(ab_path) if ab_path.exists() else ab.canonical_hash)
             ba_hash = equality.right_hash or (canonical_hash(ba_path) if ba_path.exists() else ba.canonical_hash)
@@ -241,7 +266,17 @@ def run_pair_tests(
         row["ab_materialized"] = _bool(ab.materialized and ab_path.exists())
         row["ba_materialized"] = _bool(ba.materialized and ba_path.exists())
         row["pair_materializations"] = str(materializations if defer_materialization else 2)
-        row["pair_materializations_avoided"] = str(2 - materializations if defer_materialization else 0)
+        row["pair_materializations_avoided"] = str(max(0, 2 - materializations) if defer_materialization else 0)
+        actual_pass_invocations = (2 if reused_single_pass_outputs else 4) + retry_pass_invocations
+        row["ab_success"] = _bool(ab.success)
+        row["ba_success"] = _bool(ba.success)
+        row["time_ms"] = f"{opt_time_ms:.3f}"
+        row["pair_test_time_ms"] = f"{opt_time_ms:.3f}"
+        row["pair_test_opt_runs"] = str(2 + retry_opt_runs)
+        row["pair_test_pass_invocations_actual"] = str(actual_pass_invocations)
+        row["pair_test_pass_invocations_saved"] = str(4 - actual_pass_invocations)
+        row["second_stage_runs"] = str((2 + retry_opt_runs) if reused_single_pass_outputs else 0)
+        row["pair_test_retry_opt_runs"] = str(retry_opt_runs)
         cache.store(cache_key, row)
         if ab.backend == "worker":
             release_run_result(ab, timeout=timeout)
@@ -426,6 +461,45 @@ def _update_pair_history(history: dict, rows: list[dict]) -> None:
             entry["unknown_count"] = _to_int(entry.get("unknown_count")) + 1
 
 
+def _rerun_pair_materialized(
+    *,
+    tools: dict,
+    input_ll: Path,
+    reuse_a: Path | None,
+    reuse_b: Path | None,
+    pipeline_a: str,
+    pipeline_b: str,
+    ab_path: Path,
+    ba_path: Path,
+    timeout: int,
+) -> tuple[RunResult, RunResult]:
+    if reuse_a is not None and reuse_b is not None:
+        ab = run_opt(
+            str(tools["opt"]), reuse_a, [pipeline_b], ab_path, timeout, materialize=True
+        )
+        ba = run_opt(
+            str(tools["opt"]), reuse_b, [pipeline_a], ba_path, timeout, materialize=True
+        )
+    else:
+        ab = run_opt(
+            str(tools["opt"]),
+            input_ll,
+            [pipeline_a, pipeline_b],
+            ab_path,
+            timeout,
+            materialize=True,
+        )
+        ba = run_opt(
+            str(tools["opt"]),
+            input_ll,
+            [pipeline_b, pipeline_a],
+            ba_path,
+            timeout,
+            materialize=True,
+        )
+    return ab, ba
+
+
 def _base_row(input_ll: Path, profile_a: dict, profile_b: dict, ab_path: Path, ba_path: Path) -> dict:
     return {
         "program": profile_a.get("program") or Path(input_ll).parent.name or Path(input_ll).stem,
@@ -485,6 +559,9 @@ def _base_row(input_ll: Path, profile_a: dict, profile_b: dict, ab_path: Path, b
         "reused_single_pass_outputs": "false",
         "full_pipeline_runs_avoided": "",
         "second_stage_runs": "",
+        "materialization_retry": "false",
+        "materialization_retry_reason": "",
+        "pair_test_retry_opt_runs": "0",
         "llvm_diff_time_ms": "",
         "comparator_time_ms": "",
     }

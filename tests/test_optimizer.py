@@ -1,4 +1,5 @@
 import csv
+import json
 import subprocess
 import sys
 import tempfile
@@ -931,6 +932,347 @@ class OptimizerTests(unittest.TestCase):
         self.assertIn("selected_mode: exact", summary)
         self.assertEqual({row["state_id"]: row["leaf_reason"] for row in leaves}["S0002"], "no_active_passes")
 
+    def test_rolling_exact_expands_all_batches_without_beam_or_batch_caps(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result, out_dir, fake_analyze = _run_fake_exact_optimizer(
+                Path(tmp),
+                mode="rolling-exact",
+                candidate_ids_by_state={"S0000": ["B0000", "B0001"], "S0001": [], "S0002": []},
+                validation_statuses={
+                    ("S0000", "B0000"): "all_permutations_same",
+                    ("S0000", "B0001"): "all_permutations_same",
+                },
+                child_instruction_counts={("S0000", "B0000"): 2, ("S0000", "B0001"): 1},
+                rolling_window_depth=2,
+                rolling_frontier_width=1,
+                beam_width=1,
+                max_batches_per_state=1,
+            )
+
+            states = _read_csv(out_dir / "states.csv")
+            transitions = _read_csv(out_dir / "batch_state_transitions.csv")
+            windows = _read_csv(out_dir / "rolling_windows.csv")
+            frontier_scores = _read_csv(out_dir / "frontier_scores.csv")
+
+        self.assertEqual(result["selected_mode"], "rolling-exact")
+        self.assertEqual(result["exact_status"], "rolling_exact_complete")
+        self.assertEqual(result["selected_final_state"], "S0002")
+        self.assertEqual([row["state_id"] for row in states], ["S0000", "S0001", "S0002"])
+        self.assertEqual(len(transitions), 2)
+        self.assertEqual(fake_analyze.call_count, 3)
+        self.assertEqual(frontier_scores, [])
+        self.assertEqual(windows[0]["selected_terminal_state_id"], "S0002")
+        self.assertEqual(windows[-1]["closure_reason"], "no_active_passes")
+
+    def test_rolling_exact_commits_best_depth_two_terminal_then_continues(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result, out_dir, _fake_analyze = _run_fake_exact_optimizer(
+                Path(tmp),
+                mode="rolling-exact",
+                candidate_ids_by_state={
+                    "S0000": ["B0000", "B0001"],
+                    "S0001": ["B0000"],
+                    "S0002": ["B0000"],
+                    "S0003": ["B0000"],
+                    "S0004": [],
+                    "S0005": ["B0000"],
+                    "S0006": [],
+                },
+                validation_statuses={
+                    ("S0000", "B0000"): "all_permutations_same",
+                    ("S0000", "B0001"): "all_permutations_same",
+                    ("S0001", "B0000"): "all_permutations_same",
+                    ("S0002", "B0000"): "all_permutations_same",
+                    ("S0003", "B0000"): "all_permutations_same",
+                    ("S0005", "B0000"): "all_permutations_same",
+                },
+                child_instruction_counts={
+                    ("S0000", "B0000"): 6,
+                    ("S0000", "B0001"): 7,
+                    ("S0001", "B0000"): 4,
+                    ("S0002", "B0000"): 5,
+                    ("S0003", "B0000"): 8,
+                    ("S0005", "B0000"): 1,
+                },
+                rolling_window_depth=2,
+                rolling_frontier_width=1,
+            )
+
+            chosen = _read_csv(out_dir / "chosen_path.csv")
+            windows = _read_csv(out_dir / "rolling_windows.csv")
+            metadata = json.loads((out_dir / "metadata.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(result["selected_final_state"], "S0006")
+        self.assertEqual(result["rolling_windows_completed"], 2)
+        self.assertEqual([row["child_state_id"] for row in chosen], ["S0001", "S0003", "S0005", "S0006"])
+        self.assertEqual([row["selected_terminal_state_id"] for row in windows[:2]], ["S0003", "S0006"])
+        self.assertEqual(windows[-1]["closure_reason"], "no_active_passes")
+        self.assertEqual(metadata["exact_scope"], "rolling_global_exact_to_closure")
+        self.assertEqual(metadata["rolling_window_depth"], 2)
+        self.assertEqual(metadata["rolling_windows_completed"], 2)
+
+    def test_rolling_exact_keeps_five_checkpoint_states_for_the_next_window(self) -> None:
+        candidate_ids_by_state = {"S0000": [f"B{index:04d}" for index in range(6)]}
+        validation_statuses = {
+            ("S0000", f"B{index:04d}"): "all_permutations_same"
+            for index in range(6)
+        }
+        child_instruction_counts = {
+            ("S0000", f"B{index:04d}"): index + 10
+            for index in range(6)
+        }
+        for state_number in range(1, 6):
+            state_id = f"S{state_number:04d}"
+            candidate_ids_by_state[state_id] = ["B0000"]
+            validation_statuses[(state_id, "B0000")] = "all_permutations_same"
+            child_instruction_counts[(state_id, "B0000")] = state_number + 20
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result, out_dir, _fake_analyze = _run_fake_exact_optimizer(
+                Path(tmp),
+                mode="rolling-exact",
+                candidate_ids_by_state=candidate_ids_by_state,
+                validation_statuses=validation_statuses,
+                child_instruction_counts=child_instruction_counts,
+                rolling_window_depth=1,
+                rolling_frontier_width=5,
+                max_rolling_windows=2,
+                batchify_terminal_states=False,
+            )
+
+            transitions = _read_csv(out_dir / "batch_state_transitions.csv")
+            windows = _read_csv(out_dir / "rolling_windows.csv")
+            metadata = json.loads((out_dir / "metadata.json").read_text(encoding="utf-8"))
+
+        second_window_parents = {
+            row["parent_state_id"]
+            for row in transitions
+            if row["parent_state_id"] != "S0000"
+        }
+        self.assertEqual(windows[0]["selected_frontier_count"], "5")
+        self.assertEqual(windows[1]["root_count"], "5")
+        self.assertEqual(second_window_parents, {"S0001", "S0002", "S0003", "S0004", "S0005"})
+        self.assertEqual(result["rolling_frontier_states_pruned"], 1)
+        self.assertFalse(result["global_search_complete"])
+        self.assertTrue(metadata["rolling_frontier_pruned"])
+
+    def test_rolling_exact_does_not_prune_inside_a_window(self) -> None:
+        candidate_ids_by_state = {"S0000": [f"B{index:04d}" for index in range(6)]}
+        validation_statuses = {
+            ("S0000", f"B{index:04d}"): "all_permutations_same"
+            for index in range(6)
+        }
+        child_instruction_counts = {
+            ("S0000", f"B{index:04d}"): index + 10
+            for index in range(6)
+        }
+        for state_number in range(1, 7):
+            state_id = f"S{state_number:04d}"
+            candidate_ids_by_state[state_id] = ["B0000"]
+            validation_statuses[(state_id, "B0000")] = "all_permutations_same"
+            child_instruction_counts[(state_id, "B0000")] = state_number + 20
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _result, out_dir, _fake_analyze = _run_fake_exact_optimizer(
+                Path(tmp),
+                mode="rolling-exact",
+                candidate_ids_by_state=candidate_ids_by_state,
+                validation_statuses=validation_statuses,
+                child_instruction_counts=child_instruction_counts,
+                rolling_window_depth=2,
+                rolling_frontier_width=1,
+                max_rolling_windows=1,
+                batchify_terminal_states=False,
+            )
+
+            transitions = _read_csv(out_dir / "batch_state_transitions.csv")
+
+        depth_one_parents = {
+            row["parent_state_id"]
+            for row in transitions
+            if row["parent_state_id"] != "S0000"
+        }
+        self.assertEqual(depth_one_parents, {f"S{index:04d}" for index in range(1, 7)})
+
+    def test_rolling_exact_closed_states_do_not_consume_frontier_slots(self) -> None:
+        candidate_ids_by_state = {
+            "S0000": [f"B{index:04d}" for index in range(7)],
+            "S0001": [],
+        }
+        validation_statuses = {
+            ("S0000", f"B{index:04d}"): "all_permutations_same"
+            for index in range(7)
+        }
+        child_instruction_counts = {
+            ("S0000", f"B{index:04d}"): index + 10
+            for index in range(7)
+        }
+        for state_number in range(2, 8):
+            candidate_ids_by_state[f"S{state_number:04d}"] = ["B0000"]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _result, out_dir, _fake_analyze = _run_fake_exact_optimizer(
+                Path(tmp),
+                mode="rolling-exact",
+                candidate_ids_by_state=candidate_ids_by_state,
+                validation_statuses=validation_statuses,
+                child_instruction_counts=child_instruction_counts,
+                rolling_window_depth=1,
+                rolling_frontier_width=5,
+                max_rolling_windows=1,
+                batchify_terminal_states=False,
+            )
+
+            windows = _read_csv(out_dir / "rolling_windows.csv")
+
+        selected = windows[0]["selected_frontier_state_ids"].split(";")
+        self.assertEqual(len(selected), 5)
+        self.assertNotIn("S0001", selected)
+        self.assertEqual(windows[0]["closed_terminal_states"], "1")
+
+    def test_rolling_exact_closes_when_transition_returns_to_committed_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result, out_dir, fake_analyze = _run_fake_exact_optimizer(
+                Path(tmp),
+                mode="rolling-exact",
+                candidate_ids_by_state={"S0000": ["B0000"]},
+                validation_statuses={("S0000", "B0000"): "all_permutations_same"},
+                child_instruction_counts={("S0000", "B0000"): 3},
+                rolling_window_depth=2,
+            )
+
+            dag = _read_csv(out_dir / "state_dag.csv")
+            windows = _read_csv(out_dir / "rolling_windows.csv")
+            chosen = _read_csv(out_dir / "chosen_path.csv")
+
+        self.assertEqual(result["exact_status"], "rolling_exact_complete")
+        self.assertEqual(result["stop_reason"], "state_graph_closed")
+        self.assertEqual(result["selected_final_state"], "S0000")
+        self.assertEqual(fake_analyze.call_count, 1)
+        self.assertEqual(len(dag), 1)
+        self.assertEqual(dag[0]["is_duplicate"], "true")
+        self.assertEqual(windows[0]["closure_reason"], "state_graph_closed")
+        self.assertEqual(chosen, [])
+
+    def test_rolling_exact_closes_when_complete_state_has_no_executable_batches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result, out_dir, fake_analyze = _run_fake_exact_optimizer(
+                Path(tmp),
+                mode="rolling-exact",
+                candidate_ids_by_state={"S0000": []},
+                validation_statuses={},
+                complete_no_executable_states={"S0000"},
+                rolling_window_depth=2,
+            )
+
+            windows = _read_csv(out_dir / "rolling_windows.csv")
+
+        self.assertEqual(result["exact_status"], "rolling_exact_complete")
+        self.assertEqual(result["stop_reason"], "no_executable_batches")
+        self.assertEqual(result["selected_final_state"], "S0000")
+        self.assertEqual(fake_analyze.call_count, 1)
+        self.assertEqual(windows[0]["closure_reason"], "no_executable_batches")
+
+    def test_rolling_exact_window_cap_is_incomplete_not_complete(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result, out_dir, _fake_analyze = _run_fake_exact_optimizer(
+                Path(tmp),
+                mode="rolling-exact",
+                candidate_ids_by_state={"S0000": ["B0000"], "S0001": ["B0000"], "S0002": []},
+                validation_statuses={
+                    ("S0000", "B0000"): "all_permutations_same",
+                    ("S0001", "B0000"): "all_permutations_same",
+                },
+                child_instruction_counts={("S0000", "B0000"): 2, ("S0001", "B0000"): 1},
+                rolling_window_depth=1,
+                max_rolling_windows=1,
+            )
+
+            status = (out_dir / "exact_status.txt").read_text(encoding="utf-8")
+
+        self.assertEqual(result["selected_final_state"], "S0001")
+        self.assertEqual(result["exact_status"], "rolling_exact_incomplete")
+        self.assertEqual(result["stop_reason"], "max_rolling_windows_reached")
+        self.assertIn("rolling_window_cap_reached", result["exact_incomplete_reasons"])
+        self.assertIn("rolling_window_cap_reached", status)
+
+    def test_rolling_exact_state_cap_is_incomplete(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result, out_dir, _fake_analyze = _run_fake_exact_optimizer(
+                Path(tmp),
+                mode="rolling-exact",
+                candidate_ids_by_state={"S0000": ["B0000", "B0001"]},
+                validation_statuses={
+                    ("S0000", "B0000"): "all_permutations_same",
+                    ("S0000", "B0001"): "all_permutations_same",
+                },
+                child_instruction_counts={("S0000", "B0000"): 2, ("S0000", "B0001"): 1},
+                rolling_window_depth=2,
+                max_states=2,
+            )
+
+        self.assertEqual(result["exact_status"], "rolling_exact_incomplete")
+        self.assertIn("state_cap_exceeded", result["exact_incomplete_reasons"])
+        self.assertTrue(result["budget_exhausted"])
+
+    def test_rolling_exact_evidence_incomplete_is_not_reported_as_budget_exhaustion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result, _out_dir, _fake_analyze = _run_fake_exact_optimizer(
+                Path(tmp),
+                mode="rolling-exact",
+                candidate_ids_by_state={"S0000": ["B0000"]},
+                validation_statuses={("S0000", "B0000"): "all_permutations_same"},
+                truncated_states={"S0000"},
+                rolling_window_depth=2,
+            )
+
+        self.assertEqual(result["exact_status"], "rolling_exact_incomplete")
+        self.assertIn("truncated_batch_candidates:S0000", result["exact_incomplete_reasons"])
+        self.assertFalse(result["budget_exhausted"])
+
+    def test_rolling_exact_batch_apply_failure_is_incomplete_and_not_executed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result, out_dir, _fake_analyze = _run_fake_exact_optimizer(
+                Path(tmp),
+                mode="rolling-exact",
+                candidate_ids_by_state={"S0000": ["B0000"]},
+                validation_statuses={("S0000", "B0000"): "all_permutations_same"},
+                failed_apply={("S0000", "B0000")},
+                rolling_window_depth=2,
+            )
+
+            transitions = _read_csv(out_dir / "batch_state_transitions.csv")
+
+        self.assertEqual(result["exact_status"], "rolling_exact_incomplete")
+        self.assertIn("batch_apply_failed:S0000:B0000", result["exact_incomplete_reasons"])
+        self.assertEqual(transitions, [])
+        self.assertFalse(result["budget_exhausted"])
+
+    def test_rolling_exact_treats_validation_mismatch_as_complete_negative_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result, out_dir, _fake_analyze = _run_fake_exact_optimizer(
+                Path(tmp),
+                mode="rolling-exact",
+                candidate_ids_by_state={"S0000": ["B0000", "B0001"], "S0001": []},
+                validation_statuses={
+                    ("S0000", "B0000"): "all_permutations_same",
+                    ("S0000", "B0001"): "mismatch",
+                },
+                child_instruction_counts={("S0000", "B0000"): 1},
+                rolling_window_depth=2,
+            )
+
+            transitions = _read_csv(out_dir / "batch_state_transitions.csv")
+            correctness = _read_csv(out_dir / "states" / "S0000" / "batch_correctness.csv")
+
+        self.assertEqual(result["exact_status"], "rolling_exact_complete")
+        self.assertEqual(result["exact_incomplete_reasons"], "")
+        self.assertEqual([row["batch_id"] for row in transitions], ["B0000"])
+        self.assertEqual(
+            {row["batch_id"]: row["correctness_class"] for row in correctness},
+            {"B0000": "certified_batch", "B0001": "rejected_batch"},
+        )
+
     def test_exact_mode_does_not_execute_sampled_batches(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             result, out_dir, fake_analyze = _run_fake_exact_optimizer(
@@ -1641,9 +1983,12 @@ def _run_fake_optimizer(
 def _run_fake_exact_optimizer(
     root: Path,
     *,
+    mode: str = "exact",
     candidate_ids_by_state: dict[str, list[str]],
     validation_statuses: dict[tuple[str, str], str],
     child_instruction_counts: dict[tuple[str, str], int] | None = None,
+    failed_apply: set[tuple[str, str]] | None = None,
+    complete_no_executable_states: set[str] | None = None,
     truncated_states: set[str] | None = None,
     unresolved_states: set[str] | None = None,
     max_pairs_truncated_states: set[str] | None = None,
@@ -1656,6 +2001,11 @@ def _run_fake_exact_optimizer(
     batchify_terminal_states: bool = True,
     max_rounds: int = 1,
     max_states: int = 5000,
+    rolling_window_depth: int = 2,
+    rolling_frontier_width: int = 1,
+    max_rolling_windows: int = 0,
+    beam_width: int = 8,
+    max_batches_per_state: int = 20,
 ):
     root.mkdir(parents=True, exist_ok=True)
     input_path = root / "input.ll"
@@ -1665,6 +2015,8 @@ def _run_fake_exact_optimizer(
     out_dir = root / "optimized"
     prepared_ir = out_dir / "input.ll"
     child_instruction_counts = child_instruction_counts or {}
+    failed_apply = failed_apply or set()
+    complete_no_executable_states = complete_no_executable_states or set()
     truncated_states = truncated_states or set()
     unresolved_states = unresolved_states or set()
     max_pairs_truncated_states = max_pairs_truncated_states or set()
@@ -1695,7 +2047,7 @@ def _run_fake_exact_optimizer(
     ):
         state_dir = Path(state_dir)
         state_dir.mkdir(parents=True, exist_ok=True)
-        active = "0" if candidate_ids_by_state.get(state_id) == [] else "2"
+        active = "2" if state_id in complete_no_executable_states else ("0" if candidate_ids_by_state.get(state_id) == [] else "2")
         _write_csv(
             state_dir / "pass_profile.csv",
             [
@@ -1910,9 +2262,9 @@ def _run_fake_exact_optimizer(
                     "program": out_dir.name,
                     "state_id": state_id,
                     "state_hash": f"{state_id}-hash",
-                    "active_passes": "0" if not candidate_ids else "2",
-                    "active_pairs": "0" if not candidate_ids else "1",
-                    "commute_pairs": "0" if not candidate_ids else "1",
+                    "active_passes": "2" if state_id in complete_no_executable_states else ("0" if not candidate_ids else "2"),
+                    "active_pairs": "1" if state_id in complete_no_executable_states else ("0" if not candidate_ids else "1"),
+                    "commute_pairs": "1" if state_id in complete_no_executable_states else ("0" if not candidate_ids else "1"),
                     "conflict_pairs": "0",
                     "conflict_components": "0" if not candidate_ids else "1",
                     "max_component_size": "0" if not candidate_ids else "2",
@@ -1958,9 +2310,20 @@ def _run_fake_exact_optimizer(
         out = Path(out)
         parent_state = out.parents[2].name
         batch_id = out.stem.split("_")[-1]
+        if (parent_state, batch_id) in failed_apply:
+            return RunResult([opt], 1, "", "apply failed", 1.0)
         count = child_instruction_counts.get((parent_state, batch_id), 2)
         out.write_text(_ir_with_instruction_count(count), encoding="utf-8")
         return RunResult([opt], 0, "", "", 1.0)
+
+    from phasebatch import optimizer as optimizer_module
+
+    real_exact_incomplete_reasons = optimizer_module._exact_incomplete_reasons
+
+    def fake_exact_incomplete_reasons(state_dir, batch_info):
+        if Path(state_dir).name in complete_no_executable_states:
+            return []
+        return real_exact_incomplete_reasons(state_dir, batch_info)
 
     with mock.patch("phasebatch.optimizer.collect_toolchain", return_value={"tools": {"clang": {"path": "clang"}, "opt": {"path": "opt"}}}), \
         mock.patch("phasebatch.optimizer.prepare_input_ir", side_effect=fake_prepare), \
@@ -1968,15 +2331,17 @@ def _run_fake_exact_optimizer(
         mock.patch("phasebatch.optimizer.analyze_state", side_effect=fake_analyze_state) as fake_analyze, \
         mock.patch("phasebatch.optimizer.build_batch_family", side_effect=fake_build_batch_family), \
         mock.patch("phasebatch.optimizer.validate_batch_candidates", side_effect=fake_validate_batch_candidates), \
+        mock.patch("phasebatch.optimizer._exact_incomplete_reasons", side_effect=fake_exact_incomplete_reasons), \
         mock.patch("phasebatch.optimizer.run_opt", side_effect=fake_run_opt):
         result = optimize_batches(
             input_path,
             out_dir,
             passes_path,
-            mode="exact",
+            mode=mode,
             objective="ir-inst-count",
             max_rounds=max_rounds,
-            max_batches_per_state=20,
+            beam_width=beam_width,
+            max_batches_per_state=max_batches_per_state,
             validate_batches=True,
             allow_sampled_batches=allow_sampled_batches,
             allow_bounded_validation=allow_bounded_validation,
@@ -1987,6 +2352,9 @@ def _run_fake_exact_optimizer(
             timeout=1,
             max_pairs=10,
             max_states=max_states,
+            rolling_window_depth=rolling_window_depth,
+            rolling_frontier_width=rolling_frontier_width,
+            max_rolling_windows=max_rolling_windows,
             batchify_terminal_states=batchify_terminal_states,
             verify_final_pipeline=False,
         )

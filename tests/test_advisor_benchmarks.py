@@ -109,6 +109,35 @@ class AdvisorBenchmarkTests(unittest.TestCase):
 
         self.assertEqual(result["selected"], [{"name": "chosen-name", "path": str(source.resolve())}])
 
+    def test_program_ids_are_unique_on_case_insensitive_filesystems(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            upper = root / "SingleSource" / "A" / "Queens.c"
+            lower = root / "SingleSource" / "B" / "queens.c"
+            for source in (upper, lower):
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_text("int main(void) { return 0; }\n", encoding="utf-8")
+
+            def fake_compile(_clang, _source, output, _timeout):
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_text("define i32 @main() { ret i32 0 }\n", encoding="utf-8")
+                return RunResult(["clang"], 0, "", "", 1.0, output_path=output)
+
+            result = discover_advisor_benchmarks(
+                test_suite_root=root,
+                out_dir=root / "out",
+                clang="clang",
+                num_programs=2,
+                max_source_bytes=1000,
+                selection_seed=0,
+                timeout=3,
+                compile_runner=fake_compile,
+            )
+
+        names = [row["name"] for row in result["selected"]]
+        self.assertEqual(len({name.casefold() for name in names}), 2)
+        self.assertEqual(names, ["Queens", "queens_2"])
+
 
 def _read_csv(path: Path) -> list[dict]:
     with path.open(encoding="utf-8", newline="") as handle:

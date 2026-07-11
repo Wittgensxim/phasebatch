@@ -108,6 +108,44 @@ class FinalSummaryTests(unittest.TestCase):
         self.assertIn("Baseline results are missing. Run compare-baselines or use --run-baselines.", text)
         self.assertIn("## 7. Baseline Comparison", text)
 
+    def test_rolling_exact_configuration_reports_window_scope_without_beam_controls(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            _write_complete_run(run_dir)
+            metadata_path = run_dir / "metadata.json"
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            metadata.update(
+                {
+                    "mode": "rolling-exact",
+                    "exact_scope": "rolling_local_exact_to_closure",
+                    "rolling_window_depth": 2,
+                    "rolling_frontier_width": 5,
+                    "max_rolling_windows": 0,
+                    "rolling_windows_completed": 3,
+                    "rolling_committed_depth": 6,
+                    "rolling_closure_reason": "no_active_passes",
+                    "rolling_frontier_pruned": True,
+                    "rolling_frontier_states_pruned": 7,
+                    "global_search_complete": False,
+                }
+            )
+            metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+            (run_dir / "exact_status.txt").write_text("rolling_exact_complete\n", encoding="utf-8")
+
+            text = generate_final_summary(run_dir).read_text(encoding="utf-8")
+
+        self.assertIn("- exact_scope: rolling_local_exact_to_closure", text)
+        self.assertIn("- rolling_window_depth: 2", text)
+        self.assertIn("- rolling_frontier_width: 5", text)
+        self.assertIn("- max_rolling_windows: 0 (until closure)", text)
+        self.assertIn("- rolling_windows_completed: 3", text)
+        self.assertIn("- rolling_committed_depth: 6", text)
+        self.assertIn("- rolling_closure_reason: no_active_passes", text)
+        self.assertIn("- rolling_frontier_pruned: True", text)
+        self.assertIn("- rolling_frontier_states_pruned: 7", text)
+        self.assertIn("- global_search_complete: False", text)
+        self.assertNotIn("- beam_width:", text)
+
     def test_baseline_comparison_identifies_best_and_comparisons(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp) / "run"

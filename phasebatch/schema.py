@@ -87,6 +87,9 @@ PAIR_RELATION_FIELDS = [
     "reused_single_pass_outputs",
     "full_pipeline_runs_avoided",
     "second_stage_runs",
+    "materialization_retry",
+    "materialization_retry_reason",
+    "pair_test_retry_opt_runs",
     "llvm_diff_time_ms",
     "comparator_time_ms",
 ]

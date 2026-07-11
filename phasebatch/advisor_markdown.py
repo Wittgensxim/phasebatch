@@ -106,7 +106,7 @@ def generate_advisor_markdown(study_dir: Path, *, metadata: dict | None = None) 
             "- Coarse overlap 只是 diagnostic，不是独立性证明。",
             "- Objective 不是 commutation proof。",
             "- 当前报告不主张 runtime 优于 O2/O3。",
-            "- exact / budgeted 各有范围边界。", "",
+            "- rolling-exact / fixed-depth exact / budgeted 各有范围边界。", "",
             CORRECTNESS_BOUNDARY_ZH, "",
         ]
     )
@@ -201,12 +201,22 @@ def _configuration_lines(metadata: dict, benchmark_count: int) -> list[str]:
         )
     else:
         backend_text = str(backend)
+    mode = str(metadata.get("mode", "N/A"))
+    if mode == "rolling-exact":
+        window_cap = metadata.get("max_rolling_windows", 0)
+        search_scope_lines = [
+            f"- rolling_window_depth: {metadata.get('rolling_window_depth', 2)}",
+            f"- rolling_frontier_width: {metadata.get('rolling_frontier_width', 5)}",
+            f"- max_rolling_windows: {window_cap}" + (" (until closure)" if str(window_cap) == "0" else " (safety cap; reaching it is incomplete)"),
+        ]
+    else:
+        search_scope_lines = [f"- Max rounds：{metadata.get('max_rounds', 'N/A')}"]
     return [
         f"- LLVM/opt 版本：{_version_line(metadata.get('llvm_opt_version', metadata.get('llvm_version', 'N/A')))}",
         f"- Benchmark 数：{metadata.get('benchmark_count', benchmark_count)}",
         f"- Pass set：{metadata.get('pass_config', 'N/A')}",
-        f"- 搜索模式：{metadata.get('mode', 'N/A')}",
-        f"- Max rounds：{metadata.get('max_rounds', 'N/A')}",
+        f"- 搜索模式：{mode}",
+        *search_scope_lines,
         f"- Pair mode：{metadata.get('pair_testing_mode', 'full')}",
         f"- Batch construction：{metadata.get('batch_construction_mode', 'pairwise')}",
         f"- Validation mode：{metadata.get('batch_validation_mode', 'auto')}",

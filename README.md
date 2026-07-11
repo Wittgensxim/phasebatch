@@ -3,8 +3,9 @@
 Phasebatch is an LLVM phase-ordering research prototype that compresses
 state-local ordering choices into correctness-gated pass batches. The maintained
 mainline uses a complete pair matrix, validation DAGs, a strict in-process LLVM
-worker, exact or budgeted state search, staged optimization, and reproducible
-Chinese advisor reports.
+worker, rolling local-exact state search, staged optimization, and reproducible
+Chinese advisor reports. Fixed-depth exact and budgeted search remain comparison
+modes.
 
 ## Maintained Mainline
 
@@ -18,7 +19,9 @@ For each reached LLVM IR state, Phasebatch:
 6. validates complete batches by exhaustive permutations or a permutation DAG;
 7. executes only candidates allowed by the correctness classifier;
 8. merges equal canonical IR states in the optimizer DAG;
-9. replays the selected pipeline and removes normal-run `.ll` intermediates.
+9. completely expands a two-layer window, retains up to five diverse open
+   terminals, and repeats from all retained states until the state graph closes;
+10. replays the selected pipeline and removes normal-run `.ll` intermediates.
 
 Unknown or failed pairs are never marked commute. They remain distinct in the
 evidence tables, but operationally they are non-foldable conflict edges.
@@ -92,8 +95,10 @@ D:/Miniconda/envs/dlm/python.exe -m phasebatch optimize-batches `
   --input benchmarks/tiny/branch.c `
   --out outputs/optimized_branch `
   --passes configs/core_passes_v1.yaml `
-  --mode exact `
-  --max-rounds 2 `
+  --mode rolling-exact `
+  --rolling-window-depth 2 `
+  --rolling-frontier-width 5 `
+  --max-rolling-windows 0 `
   --max-states 2000 `
   --batch-construction-mode pairwise `
   --pair-testing-mode full `
@@ -102,9 +107,14 @@ D:/Miniconda/envs/dlm/python.exe -m phasebatch optimize-batches `
   --jobs 8
 ```
 
-`exact` explores every executable batch within configured component, candidate,
-state, and validation bounds. `budgeted` applies beam/state/batch caps. Neither
-mode may execute a failed, rejected, unknown, or unvalidated batch. The
+`rolling-exact` uses no pruning or per-state executable-batch cap inside a
+window. At the second-layer checkpoint it keeps up to five states using the
+objective/call/memory/branch/novelty buckets. Correctness evidence completeness
+and global search completeness are reported separately: frontier pruning sets
+`global_search_complete=false`, while any safety or evidence failure produces
+an incomplete exact status. `exact` retains fixed-depth exact-rN semantics, and
+`budgeted` retains beam/batch caps.
+No mode may execute a failed, rejected, unknown, or unvalidated batch. The
 objective is used only for path selection, never as correctness evidence.
 
 Useful result-side commands are:
@@ -169,30 +179,25 @@ classifications, selected state, pipeline, and replay result matched.
 
 ## 中文导师数据报告
 
-Run the fixed 20-program report workflow:
+Run the formal rolling-exact report workflow (50 programs by default):
 
 ```powershell
 D:/Miniconda/envs/dlm/python.exe -m phasebatch run-advisor-report-zh `
   --test-suite-root E:/llvm-test-suite `
-  --out outputs/advisor_report_zh_20programs `
+  --out outputs/advisor_report_zh_50programs_rolling_exact `
   --passes configs/core_passes_v1.yaml `
-  --num-programs 20 `
-  --mode budgeted `
-  --max-rounds 2 `
-  --beam-width 4 `
-  --max-states 150 `
-  --max-batches-per-state 10 `
-  --budgeted-validation-strategy all `
-  --pair-testing-mode full `
-  --batch-construction-mode pairwise `
-  --batch-validation-mode auto `
-  --validate-batches `
+  --mode rolling-exact `
+  --rolling-window-depth 2 `
+  --rolling-frontier-width 5 `
+  --max-rolling-windows 0 `
   --jobs 8 `
   --timeout 15 `
-  --max-pairs 300 `
   --resume `
   --continue-on-error
 ```
+
+The retained `outputs/advisor_report_zh_20programs` study is a budgeted
+depth-2/beam-4 pilot. It is not relabelled as rolling-exact evidence.
 
 Rebuild all aggregate CSV, figures, DAGs, and Markdown without running LLVM:
 
@@ -221,6 +226,7 @@ pipeline_replay.csv
 optimize_summary.md
 final_summary.md
 exact_status.txt
+rolling_windows.csv
 ```
 
 Each analyzed state records:

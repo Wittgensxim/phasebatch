@@ -42,10 +42,15 @@ class CliPipelineTests(unittest.TestCase):
             ["summarize-advisor-report-zh", "--study-dir", "out"]
         )
 
-        self.assertEqual(run_args.num_programs, 15)
+        self.assertEqual(run_args.num_programs, 50)
+        self.assertEqual(run_args.mode, "rolling-exact")
+        self.assertEqual(run_args.rolling_window_depth, 2)
+        self.assertEqual(run_args.rolling_frontier_width, 5)
+        self.assertEqual(run_args.max_rolling_windows, 0)
+        self.assertEqual(run_args.max_states, 2000)
         self.assertEqual(run_args.jobs, 8)
         self.assertEqual(run_args.timeout, 15)
-        self.assertEqual(run_args.max_pairs, 300)
+        self.assertIsNone(run_args.max_pairs)
         self.assertEqual(run_args.pair_testing_mode, "full")
         self.assertEqual(run_args.batch_construction_mode, "pairwise")
         self.assertEqual(run_args.batch_validation_mode, "auto")
@@ -294,6 +299,19 @@ class CliPipelineTests(unittest.TestCase):
 
         self.assertEqual(defaults.budgeted_validation_strategy, "all")
         self.assertEqual(configured.budgeted_validation_strategy, "on-demand")
+
+    def test_optimize_parser_defaults_to_rolling_exact_mainline(self) -> None:
+        parser = build_parser()
+        defaults = parser.parse_args(
+            ["optimize-batches", "--input", "in.ll", "--out", "out", "--passes", "passes.yaml"]
+        )
+
+        self.assertEqual(defaults.mode, "rolling-exact")
+        self.assertEqual(defaults.rolling_window_depth, 2)
+        self.assertEqual(defaults.rolling_frontier_width, 5)
+        self.assertEqual(defaults.max_rolling_windows, 0)
+        self.assertEqual(defaults.max_component_size, 14)
+        self.assertTrue(defaults.validate_batches)
 
     def test_optimize_parser_accepts_only_pairwise_batch_construction(self) -> None:
         parser = build_parser()
@@ -642,6 +660,9 @@ class CliPipelineTests(unittest.TestCase):
                     mode="budgeted",
                     objective="ir-inst-count",
                     max_rounds=2,
+                    rolling_window_depth=3,
+                    rolling_frontier_width=5,
+                    max_rolling_windows=4,
                     beam_width=4,
                     max_batches_per_state=5,
                     budgeted_validation_strategy="on-demand",
@@ -669,6 +690,9 @@ class CliPipelineTests(unittest.TestCase):
         self.assertEqual(kwargs["batch_selection_policy"], "score")
         self.assertEqual(kwargs["frontier_selection_policy"], "objective")
         self.assertEqual(kwargs["budgeted_validation_strategy"], "on-demand")
+        self.assertEqual(kwargs["rolling_window_depth"], 3)
+        self.assertEqual(kwargs["rolling_frontier_width"], 5)
+        self.assertEqual(kwargs["max_rolling_windows"], 4)
         self.assertEqual(kwargs["max_component_size"], 17)
         self.assertEqual(kwargs["max_batch_candidates"], 23)
         self.assertEqual(kwargs["batchify_terminal_states"], False)

@@ -78,19 +78,37 @@ def _run_configuration_section(metadata: dict, optimize_summary: dict, exact_sta
         f"- requested mode: {requested_mode}",
         f"- selected mode: {selected_mode}",
         f"- objective: {metadata.get('objective', _first_value(optimize_summary, ['objective']))}",
-        f"- max_rounds: {metadata.get('max_rounds', _first_value(optimize_summary, ['max_rounds']))}",
         f"- exact_status: {exact_status}",
-        f"- pass config path: {metadata.get('pass_config', '')}",
     ]
-    budget_keys = [
-        "beam_width",
-        "max_states",
-        "max_batches_per_state",
-        "budgeted_validation_strategy",
-        "batch_selection_policy",
-        "frontier_selection_policy",
-        "selection_seed",
-    ]
+    if selected_mode == "rolling-exact":
+        window_cap = metadata.get("max_rolling_windows", _first_value(optimize_summary, ["max_rolling_windows"]))
+        lines.extend(
+            [
+                f"- exact_scope: {metadata.get('exact_scope', _first_value(optimize_summary, ['exact_scope']))}",
+                f"- rolling_window_depth: {metadata.get('rolling_window_depth', _first_value(optimize_summary, ['rolling_window_depth']))}",
+                f"- rolling_frontier_width: {metadata.get('rolling_frontier_width', _first_value(optimize_summary, ['rolling_frontier_width']))}",
+                f"- max_rolling_windows: {window_cap}" + (" (until closure)" if str(window_cap) == "0" else ""),
+                f"- rolling_windows_completed: {metadata.get('rolling_windows_completed', _first_value(optimize_summary, ['rolling_windows_completed']))}",
+                f"- rolling_committed_depth: {metadata.get('rolling_committed_depth', _first_value(optimize_summary, ['rolling_committed_depth']))}",
+                f"- rolling_closure_reason: {metadata.get('rolling_closure_reason', _first_value(optimize_summary, ['rolling_closure_reason']))}",
+                f"- rolling_frontier_pruned: {metadata.get('rolling_frontier_pruned', _first_value(optimize_summary, ['rolling_frontier_pruned']))}",
+                f"- rolling_frontier_states_pruned: {metadata.get('rolling_frontier_states_pruned', _first_value(optimize_summary, ['rolling_frontier_states_pruned']))}",
+                f"- global_search_complete: {metadata.get('global_search_complete', _first_value(optimize_summary, ['global_search_complete']))}",
+            ]
+        )
+        budget_keys = ["max_states"]
+    else:
+        lines.append(f"- max_rounds: {metadata.get('max_rounds', _first_value(optimize_summary, ['max_rounds']))}")
+        budget_keys = [
+            "beam_width",
+            "max_states",
+            "max_batches_per_state",
+            "budgeted_validation_strategy",
+            "batch_selection_policy",
+            "frontier_selection_policy",
+            "selection_seed",
+        ]
+    lines.append(f"- pass config path: {metadata.get('pass_config', '')}")
     for key in budget_keys:
         value = metadata.get(key, _first_value(optimize_summary, [key]))
         if value not in (None, ""):
